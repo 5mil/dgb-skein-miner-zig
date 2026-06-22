@@ -35,12 +35,13 @@ fn stripStratumPrefix(s: []const u8) []const u8 {
     return s;
 }
 
-// Zig 0.16 "Juicy Main": std.process.Init injects a pre-configured allocator
-// and argv. std.heap.GeneralPurposeAllocator was renamed to DebugAllocator;
-// init.gpa already wraps DebugAllocator so we don't need to construct one manually.
+// Zig 0.16 "Juicy Main":
+//   init.gpa              -- std.mem.Allocator (backed by DebugAllocator in debug builds)
+//   init.arena            -- *std.heap.ArenaAllocator (lives for the whole process)
+//   init.minimal.args     -- raw argv iterator; .toSlice(arena) converts to [][:0]const u8
 pub fn main(init: std.process.Init) !void {
     const gpa  = init.gpa;
-    const argv = init.args;   // [][:0]u8 -- already allocated, no free needed
+    const argv = try init.minimal.args.toSlice(init.arena.allocator());
 
     if (argv.len < 2) {
         printUsage();
