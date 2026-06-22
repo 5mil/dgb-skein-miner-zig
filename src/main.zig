@@ -41,10 +41,18 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    var arg_iter = try std.process.argsWithAllocator(allocator);
+    defer arg_iter.deinit();
 
-    if (args.len < 2) {
+    // Collect args into a list
+    var args = std.ArrayList([]const u8).init(allocator);
+    defer args.deinit();
+    while (arg_iter.next()) |arg| {
+        try args.append(arg);
+    }
+    const argv = args.items;
+
+    if (argv.len < 2) {
         printUsage();
         std.debug.print("=== Self-tests ===\n", .{});
         const sk_ok = skein.runKAT();
@@ -57,19 +65,19 @@ pub fn main() !void {
     }
 
     // Single-header debug hash
-    if (args[1].len == 160) {
+    if (argv[1].len == 160) {
         var input: [80]u8 = undefined;
-        for (0..80) |i| input[i] = std.fmt.parseInt(u8, args[1][i*2..][0..2], 16) catch 0;
+        for (0..80) |i| input[i] = std.fmt.parseInt(u8, argv[1][i*2..][0..2], 16) catch 0;
         var output: [64]u8 = undefined;
         skein.skein512(&input, &output);
         std.debug.print("Skein-512: {s}\n", .{std.fmt.fmtSliceHexLower(&output)});
         return;
     }
 
-    if (!std.mem.eql(u8, args[1], "--mine")) { printUsage(); std.process.exit(1); }
-    if (args.len < 3) { printUsage(); std.process.exit(1); }
+    if (!std.mem.eql(u8, argv[1], "--mine")) { printUsage(); std.process.exit(1); }
+    if (argv.len < 3) { printUsage(); std.process.exit(1); }
 
-    const wallet = args[2];
+    const wallet = argv[2];
 
     var host: []const u8 = DEFAULT_HOST;
     var port: u16        = DEFAULT_PORT;
@@ -77,24 +85,24 @@ pub fn main() !void {
     var threads: usize   = 4;
 
     var i: usize = 3;
-    while (i < args.len) : (i += 1) {
-        const a = args[i];
-        if (std.mem.eql(u8, a, "--host") and i+1 < args.len) {
-            i += 1; host = stripStratumPrefix(args[i]);
-        } else if (std.mem.eql(u8, a, "--port") and i+1 < args.len) {
-            i += 1; port = std.fmt.parseInt(u16, args[i], 10) catch DEFAULT_PORT;
-        } else if (std.mem.eql(u8, a, "--algo") and i+1 < args.len) {
+    while (i < argv.len) : (i += 1) {
+        const a = argv[i];
+        if (std.mem.eql(u8, a, "--host") and i+1 < argv.len) {
+            i += 1; host = stripStratumPrefix(argv[i]);
+        } else if (std.mem.eql(u8, a, "--port") and i+1 < argv.len) {
+            i += 1; port = std.fmt.parseInt(u16, argv[i], 10) catch DEFAULT_PORT;
+        } else if (std.mem.eql(u8, a, "--algo") and i+1 < argv.len) {
             i += 1;
-            if (std.mem.eql(u8, args[i], "yescrypt")) {
+            if (std.mem.eql(u8, argv[i], "yescrypt")) {
                 algo = .yescrypt;
-            } else if (std.mem.eql(u8, args[i], "skein")) {
+            } else if (std.mem.eql(u8, argv[i], "skein")) {
                 algo = .skein;
             } else {
-                std.debug.print("Unknown algo: {s}\n", .{args[i]});
+                std.debug.print("Unknown algo: {s}\n", .{argv[i]});
                 std.process.exit(1);
             }
-        } else if (std.mem.eql(u8, a, "--threads") and i+1 < args.len) {
-            i += 1; threads = std.fmt.parseInt(usize, args[i], 10) catch 4;
+        } else if (std.mem.eql(u8, a, "--threads") and i+1 < argv.len) {
+            i += 1; threads = std.fmt.parseInt(usize, argv[i], 10) catch 4;
         }
     }
 
