@@ -1,21 +1,39 @@
-const std = @import("std");
-const skein    = @import("skein.zig");
+const std    = @import("std");
+const skein   = @import("skein.zig");
 const yescrypt = @import("yescrypt.zig");
 const stratum  = @import("stratum.zig");
 const miner    = @import("miner.zig");
 const cpu      = @import("cpu.zig");
+
+const DEFAULT_HOST = "americas.mining-dutch.nl";
+const DEFAULT_PORT: u16 = 9994;
 
 fn printUsage() void {
     std.debug.print(
         \\ZigRake -- DGB Skein / YescryptR16 miner
         \\
         \\Usage:
-        \\  rake                              Run self-tests
-        \\  rake --mine <host> <port> <wallet> [--algo skein|yescrypt]
+        \\  rake                                         Run self-tests
+        \\  rake <160-hex>                               Hash single header (Skein)
+        \\  rake --mine <wallet> [options]
         \\
-        \\Defaults to skein if --algo is omitted.
+        \\Options:
+        \\  --host <host>           Pool host  (default: americas.mining-dutch.nl)
+        \\  --port <port>           Pool port  (default: 9994)
+        \\  --algo skein|yescrypt  Algorithm  (default: skein)
+        \\  --threads <n>           Worker threads (default: 4)
+        \\
+        \\Example:
+        \\  rake --mine DGB1yourwalletaddress --algo skein --threads 8
         \\
     , .{});
+}
+
+/// Strip stratum+tcp:// or stratum:// prefix if present.
+fn stripStratumPrefix(s: []const u8) []const u8 {
+    if (std.mem.startsWith(u8, s, "stratum+tcp://")) return s["stratum+tcp://".len..];
+    if (std.mem.startsWith(u8, s, "stratum://"))     return s["stratum://".len..];
+    return s;
 }
 
 pub fn main() !void {
@@ -26,98 +44,79 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    // ----------------------------------------------------------------
-    // No args: run self-tests and report available algorithms
-    // ----------------------------------------------------------------
     if (args.len < 2) {
         printUsage();
-        var skein_ok    = false;
-        var yescrypt_ok = false;
-
-        std.debug.print("\n=== Self-tests ===\n", .{});
-        skein_ok = skein.runKAT();
-        yescrypt_ok = yescrypt.selftest(allocator) catch false;
-
-        std.debug.print("\n=== Available algorithms ===\n", .{});
-        if (skein_ok)    std.debug.print("  skein      [READY]\n", .{});
-        if (yescrypt_ok) std.debug.print("  yescrypt   [READY]\n", .{});
-        if (!skein_ok and !yescrypt_ok) {
-            std.debug.print("  ALL FAIL -- cannot mine\n", .{});
-            std.process.exit(1);
-        }
+        std.debug.print("=== Self-tests ===\n", .{});
+        const sk_ok = skein.runKAT();
+        const ye_ok = yescrypt.selftest(allocator) catch false;
+        std.debug.print("\n=== Available ===\n", .{});
+        if (sk_ok) std.debug.print("  skein    [READY]\n", .{});
+        if (ye_ok) std.debug.print("  yescrypt [READY]\n", .{});
+        if (!sk_ok and !ye_ok) std.process.exit(1);
         return;
     }
 
-    // ----------------------------------------------------------------
-    // --mine path
-    // ----------------------------------------------------------------
-    if (!std.mem.eql(u8, args[1], "--mine")) {
-        // Single-header hash (debug mode)
-        const header_hex = args[1];
-        if (header_hex.len != 160) {
-            std.debug.print("Error: header must be 160 hex chars (80 bytes)\n", .{});
-            std.process.exit(1);
-        }
+    // Single-header debug hash
+    if (args[1].len == 160) {
         var input: [80]u8 = undefined;
-        for (0..80) |i| input[i] = std.fmt.parseInt(u8, header_hex[i*2..][0..2], 16) catch 0;
+        for (0..80) |i| input[i] = std.fmt.parseInt(u8, args[1][i*2..][0..2], 16) catch 0;
         var output: [64]u8 = undefined;
         skein.skein512(&input, &output);
         std.debug.print("Skein-512: {s}\n", .{std.fmt.fmtSliceHexLower(&output)});
         return;
     }
 
-    if (args.len < 5) { printUsage(); std.process.exit(1); }
+    if (!std.mem.eql(u8, args[1], "--mine")) { printUsage(); std.process.exit(1); }
+    if (args.len < 3) { printUsage(); std.process.exit(1); }
 
-    const host   = args[2];
-    const port   = try std.fmt.parseInt(u16, args[3], 10);
-    const wallet = args[4];
+    const wallet = args[2];
 
-    // Parse optional --algo flag
-    var algo: miner.Algo = .skein;
-    var threads: usize = 4;
-    var i: usize = 5;
+    // Parse optional flags
+    var host: []const u8    = DEFAULT_HOST;
+    var port: u16           = DEFAULT_PORT;
+    var algo: miner.Algo    = .skein;
+    var threads: usize      = 4;
+
+    var i: usize = 3;
     while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--algo") and i + 1 < args.len) {
+        const a = args[i];
+        if (std.mem.eql(u8, a, "--host") and i+1 < args.len) {
+            i += 1; host = stripStratumPrefix(args[i]);
+        } else if (std.mem.eql(u8, a, "--port") and i+1 < args.len) {
+            i += 1; port = std.fmt.parseInt(u16, args[i], 10) catch DEFAULT_PORT;
+        } else if (std.mem.eql(u8, a, "--algo") and i+1 < args.len) {
             i += 1;
-            if (std.mem.eql(u8, args[i], "yescrypt")) algo = .yescrypt
-            else if (std.mem.eql(u8, args[i], "skein"))    algo = .skein
+            if (std.mem.eql(u8, args[i], "yescrypt"))     algo = .yescrypt
+            else if (std.mem.eql(u8, args[i], "skein"))   algo = .skein
             else { std.debug.print("Unknown algo: {s}\n", .{args[i]}); std.process.exit(1); };
-        } else if (std.mem.eql(u8, args[i], "--threads") and i + 1 < args.len) {
-            i += 1;
-            threads = std.fmt.parseInt(usize, args[i], 10) catch 4;
+        } else if (std.mem.eql(u8, a, "--threads") and i+1 < args.len) {
+            i += 1; threads = std.fmt.parseInt(usize, args[i], 10) catch 4;
         }
     }
 
-    // ----------------------------------------------------------------
-    // Self-test before mining -- must pass chosen algo
-    // ----------------------------------------------------------------
+    // Self-test for chosen algo
     std.debug.print("=== Self-test [{s}] ===\n", .{@tagName(algo)});
-    const algo_ok: bool = switch (algo) {
+    const ok: bool = switch (algo) {
         .skein    => skein.runKAT(),
         .yescrypt => yescrypt.selftest(allocator) catch false,
     };
-    if (!algo_ok) {
-        std.debug.print("[FATAL] Self-test failed for {s}. Aborting.\n", .{@tagName(algo)});
+    if (!ok) {
+        std.debug.print("[FATAL] Self-test failed. Aborting.\n", .{});
         std.process.exit(1);
     }
 
     if (algo == .skein) {
-        if (cpu.hasAvx2()) {
-            std.debug.print("[CPU] AVX2 detected -- 4-way Skein path active\n", .{});
-        } else {
-            std.debug.print("[CPU] Scalar Skein path\n", .{});
-        }
+        if (cpu.hasAvx2()) std.debug.print("[CPU] AVX2 active\n", .{})
+        else               std.debug.print("[CPU] Scalar path\n", .{});
     }
 
-    // ----------------------------------------------------------------
-    // Connect and mine
-    // ----------------------------------------------------------------
-    std.debug.print("=== Connecting to {s}:{d} as {s} ===\n", .{ host, port, wallet });
+    std.debug.print("=== Connecting {s}:{d} | wallet={s} | threads={d} ===\n",
+        .{ host, port, wallet, threads });
+
     var client = try stratum.StratumClient.connect(allocator, host, port);
     defer client.deinit();
 
     try client.subscribe();
     try client.authorize(wallet, "x");
-
     try miner.runMiner(allocator, &client, wallet, threads, algo);
 }

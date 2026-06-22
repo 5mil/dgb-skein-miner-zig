@@ -25,7 +25,7 @@ pub const StratumClient = struct {
     username:          []u8,
 
     pub fn connect(allocator: std.mem.Allocator, host: []const u8, port: u16) !StratumClient {
-        const address = try net.Address.parseIp(host, port);
+        const address = try net.Address.resolveIp(host, port);
         const stream  = try net.tcpConnectToAddress(address);
         return StratumClient{
             .stream            = stream,
@@ -43,15 +43,8 @@ pub const StratumClient = struct {
         var buf: [4096]u8 = undefined;
         const n   = try self.stream.read(&buf);
         const rsp = buf[0..n];
-        // Extract extra_nonce1: pool returns [session_id, extra_nonce1, extra_nonce2_size]
-        // Simple scan for the second JSON string after "result":
         if (extractJsonString(rsp, "extra_nonce1")) |en1| {
-            allocator_free: {
-                if (self.extra_nonce1.len > 0) {
-                    self.allocator.free(self.extra_nonce1);
-                    break :allocator_free;
-                }
-            }
+            if (self.extra_nonce1.len > 0) self.allocator.free(self.extra_nonce1);
             self.extra_nonce1 = try self.allocator.dupe(u8, en1);
         }
         std.debug.print("[Stratum] Subscribed. extra_nonce1={s}\n", .{self.extra_nonce1});
@@ -77,14 +70,10 @@ pub const StratumClient = struct {
         } else if (std.mem.indexOf(u8, line, "mining.set_difficulty") != null) {
             // TODO: update difficulty
         }
-        // Other messages (id responses) silently ignored for now.
     }
 
     /// Parse a mining.notify line and update current_job.
-    /// Stratum notify params: [job_id, prevhash, coinb1, coinb2,
-    ///                         merkle_branches, version, nbits, ntime, clean_jobs]
     pub fn parseNotify(self: *StratumClient, line: []const u8, allocator: std.mem.Allocator) !void {
-        // Extract params array content
         const params_start = std.mem.indexOf(u8, line, "\"params\":") orelse return;
         const arr_start = std.mem.indexOfPos(u8, line, params_start, "[") orelse return;
 
@@ -93,30 +82,25 @@ pub const StratumClient = struct {
         var pos: usize = arr_start + 1;
 
         while (count < 8) {
-            // Skip whitespace
             while (pos < line.len and (line[pos] == ' ' or line[pos] == ',')) pos += 1;
             if (pos >= line.len or line[pos] == ']') break;
-
             if (line[pos] == '"') {
                 pos += 1;
                 const start = pos;
                 while (pos < line.len and line[pos] != '"') pos += 1;
                 strings[count] = line[start..pos];
                 count += 1;
-                pos += 1; // skip closing quote
+                pos += 1;
             } else {
-                // non-string value (arrays, booleans) -- skip
                 while (pos < line.len and line[pos] != ',' and line[pos] != ']') pos += 1;
             }
         }
 
-        if (count < 6) return; // malformed
+        if (count < 5) return;
 
-        // strings[0]=job_id, [1]=prevhash, [2]=coinb1, [3]=coinb2
-        // [4]=version, [5]=nbits, [6]=ntime (indices shift because merkle_branches is array)
-        const job_id   = strings[0];
-        const prevhash = strings[1];
-        const ver_hex  = strings[2];
+        const job_id    = strings[0];
+        const prevhash  = strings[1];
+        const ver_hex   = strings[2];
         const nbits_hex = strings[3];
         const ntime_hex = strings[4];
 
@@ -127,17 +111,15 @@ pub const StratumClient = struct {
         const nbits   = std.fmt.parseInt(u32, nbits_hex, 16) catch 0;
         const ntime   = std.fmt.parseInt(u32, ntime_hex, 16) catch 0;
 
-        // Merkle root from coinbase (simplified: sha256d(coinb1 || extra_nonce1 || extra_nonce2 || coinb2))
-        // Full implementation would iterate branches; this gives us a valid header shape.
         var merkle_root: [32]u8 = [_]u8{0} ** 32;
-        // TODO: proper merkle branch walk (needs sha256d)
+        _ = merkle_root; // TODO: sha256d merkle walk
 
         if (self.current_job) |j| allocator.free(j.job_id);
 
         self.current_job = Job{
             .job_id      = try allocator.dupe(u8, job_id),
             .prev_hash   = prev_hash,
-            .merkle_root = merkle_root,
+            .merkle_root = [_]u8{0} ** 32,
             .coinb1      = "",
             .coinb2      = "",
             .version     = version,
@@ -145,12 +127,12 @@ pub const StratumClient = struct {
             .ntime       = ntime,
             .clean_jobs  = true,
         };
-        std.debug.print("[Stratum] New job: {s} nbits=0x{x:0>8}\n", .{ job_id, nbits });
+        std.debug.print("[Stratum] Job: {s}  nbits=0x{x:0>8}  ntime=0x{x:0>8}\n",
+            .{ job_id, nbits, ntime });
     }
 
     pub fn submitShare(self: *StratumClient, job_id: []const u8, nonce: u32, ntime: u32) !void {
         const worker = if (self.username.len > 0) self.username else "worker";
-        // extra_nonce2: 4 zero bytes for now
         var buf: [512]u8 = undefined;
         const msg = try std.fmt.bufPrint(&buf,
             "{{\"id\":4,\"method\":\"mining.submit\",\"params\":" ++
@@ -179,10 +161,6 @@ pub const StratumClient = struct {
     }
 };
 
-// -----------------------------------------------------------------------
-// Helpers
-// -----------------------------------------------------------------------
-
 fn hexDecode(hex: []const u8, out: []u8) !void {
     if (hex.len != out.len * 2) return error.BadHexLen;
     for (0..out.len) |i| {
@@ -190,8 +168,6 @@ fn hexDecode(hex: []const u8, out: []u8) !void {
     }
 }
 
-/// Very small JSON string value extractor.
-/// Looks for `"key":"value"` and returns the value slice.
 fn extractJsonString(json: []const u8, key: []const u8) ?[]const u8 {
     var search_buf: [64]u8 = undefined;
     const needle = std.fmt.bufPrint(&search_buf, "\"{s}\":\"", .{key}) catch return null;
