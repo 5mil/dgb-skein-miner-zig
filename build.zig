@@ -6,7 +6,7 @@ pub fn build(b: *std.Build) void {
 
     const exe = b.addExecutable(.{
         .name = "rake",
-        .root_source_file = b.path("src/main.zig"),
+        .root = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
