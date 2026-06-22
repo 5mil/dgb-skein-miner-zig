@@ -1,6 +1,5 @@
 const std = @import("std");
 const net = std.net;
-const json = std.json;
 
 pub const StratumVersion = enum { v1, v2 };
 
@@ -23,6 +22,7 @@ pub const StratumClient = struct {
     stratum_version: StratumVersion,
     extra_nonce1: []const u8,
     extra_nonce2_size: usize,
+    username: []const u8,
 
     pub fn connect(allocator: std.mem.Allocator, host: []const u8, port: u16) !StratumClient {
         const address = try net.Address.parseIp(host, port);
@@ -35,10 +35,13 @@ pub const StratumClient = struct {
             .stratum_version = .v1,
             .extra_nonce1 = &[_]u8{},
             .extra_nonce2_size = 4,
+            .username = "",
         };
     }
 
-    pub fn detectVersion(self: *StratumClient) !StratumVersion {
+    pub fn detectVersion(self: *StratumClient) StratumVersion {
+        // Real detection would try Stratum v2 handshake first.
+        // For now we default to v1 which is widely supported.
         self.stratum_version = .v1;
         return .v1;
     }
@@ -55,12 +58,12 @@ pub const StratumClient = struct {
             if (std.mem.indexOf(u8, response, "mining.notify") != null) {
                 std.debug.print("[Stratum v1] Subscribed successfully\n", .{});
             }
-        } else {
-            std.debug.print("[Stratum v2] Subscription (advanced - WIP)\n", .{});
         }
     }
 
     pub fn authorize(self: *StratumClient, user: []const u8, pass: []const u8) !void {
+        self.username = try self.allocator.dupe(u8, user);
+
         if (self.stratum_version == .v1) {
             var buf: [512]u8 = undefined;
             const msg = try std.fmt.bufPrint(&buf,
@@ -70,16 +73,19 @@ pub const StratumClient = struct {
             _ = try self.stream.write(msg);
 
             var response: [4096]u8 = undefined;
-            const n = try self.stream.read(&response);
-            std.debug.print("[Stratum] Authorize completed\n", .{});
+            _ = try self.stream.read(&response);
+            std.debug.print("[Stratum] Authorized as {s}\n", .{user});
         }
     }
 
     pub fn parseNotify(self: *StratumClient, line: []const u8) !void {
-        std.debug.print("[Stratum] Received mining.notify\n", .{});
+        // In production this would do proper JSON parsing of mining.notify
+        std.debug.print("[Stratum] New job received\n", .{});
+
+        // Placeholder job for now - real implementation would parse fields
         if (self.current_job == null) {
             self.current_job = Job{
-                .job_id = try self.allocator.dupe(u8, "job"),
+                .job_id = try self.allocator.dupe(u8, "current"),
                 .prev_hash = [_]u8{0} ** 32,
                 .coinb1 = &[_]u8{},
                 .coinb2 = &[_]u8{},
@@ -95,12 +101,13 @@ pub const StratumClient = struct {
     pub fn submitShare(self: *StratumClient, job_id: []const u8, nonce: u64, ntime: u32) !void {
         if (self.stratum_version == .v1) {
             var buf: [512]u8 = undefined;
+            const worker = if (self.username.len > 0) self.username else "worker";
             const msg = try std.fmt.bufPrint(&buf,
-                "{{\"id\":4,\"method\":\"mining.submit\",\"params\":[\"worker\",\"{s}\",\"{x}\",\"{x}\"]}}\n",
-                .{ job_id, nonce, ntime }
+                "{{\"id\":4,\"method\":\"mining.submit\",\"params\":[\"{s}\",\"{s}\",\"{x}\",\"{x}\"]}}\n",
+                .{ worker, job_id, nonce, ntime }
             );
             _ = try self.stream.write(msg);
-            std.debug.print("[Stratum] Share submitted nonce={x}\n", .{nonce});
+            std.debug.print("[Stratum] Share submitted (nonce={x})\n", .{nonce});
         }
     }
 
@@ -117,5 +124,11 @@ pub const StratumClient = struct {
 
     pub fn deinit(self: *StratumClient) void {
         self.stream.close();
+        if (self.current_job) |job| {
+            self.allocator.free(job.job_id);
+        }
+        if (self.username.len > 0) {
+            self.allocator.free(self.username);
+        }
     }
 }
