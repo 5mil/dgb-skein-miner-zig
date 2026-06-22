@@ -5,7 +5,6 @@ pub const SKEIN_512_STATE_WORDS: usize = 8;
 
 const C240: u64 = 0x1BD11BDAA9FC1A22;
 
-// Threefish-512 rotation constants (Skein 1.3 spec)
 const R512: [8][4]u32 = .{
     .{46, 36, 19, 37}, .{33, 27, 14, 42},
     .{17, 49, 36, 39}, .{44,  9, 54, 56},
@@ -13,17 +12,15 @@ const R512: [8][4]u32 = .{
     .{25, 29, 39, 43}, .{ 8, 35, 56, 22},
 };
 
-// Permutation PI_8
 const PI8: [8]usize = .{2, 1, 4, 7, 6, 5, 0, 3};
 
-// Tweak type values (T1 bits 56..61)
-const T_CFG:  u64 = 4;
-const T_MSG:  u64 = 48;
-const T_OUT:  u64 = 63;
+const T_CFG: u64 = 4;
+const T_MSG: u64 = 48;
+const T_OUT: u64 = 63;
 
-// T1 flag bits
-const T1_FIRST: u64 = 1 << 62;
-const T1_FINAL: u64 = 1 << 63;
+const T1_FIRST: u64 = @as(u64, 1) << 62;
+const T1_FINAL: u64 = @as(u64, 1) << 63;
+const T1_FIRST_MASK: u64 = ~T1_FIRST; // complement computed at comptime as u64
 
 fn rotl64(v: u64, n: u32) u64 {
     return (v << @as(u6, @truncate(n))) | (v >> @as(u6, @truncate(64 - n)));
@@ -32,7 +29,6 @@ fn rotl64(v: u64, n: u32) u64 {
 fn threefish512(key: [9]u64, tw: [3]u64, pt: [8]u64, ct: *[8]u64) void {
     var v: [8]u64 = pt;
 
-    // Initial key injection (subkey 0)
     v[0] +%= key[0]; v[1] +%= key[1]; v[2] +%= key[2]; v[3] +%= key[3];
     v[4] +%= key[4];
     v[5] +%= key[5] +% tw[0];
@@ -65,16 +61,9 @@ fn threefish512(key: [9]u64, tw: [3]u64, pt: [8]u64, ct: *[8]u64) void {
     ct.* = v;
 }
 
-fn load64le(p: []const u8) u64 {
-    return std.mem.readInt(u64, p[0..8], .little);
+fn load64le(p: *const [8]u8) u64 {
+    return std.mem.readInt(u64, p, .little);
 }
-
-// -----------------------------------------------------------------------
-// UBI (Unique Block Iteration)
-// ctx.T[0] = byte count AFTER this block (set by caller before calling)
-// ctx.T[1] = type | flags (FIRST cleared after first block)
-// ctx.T[2] = T[0] ^ T[1]  (computed here)
-// -----------------------------------------------------------------------
 
 pub const Skein512Ctxt = struct {
     X:          [8]u64,
@@ -82,12 +71,10 @@ pub const Skein512Ctxt = struct {
     b:          [SKEIN_512_BLOCK_BYTES]u8,
     bCnt:       usize,
     hashBitLen: usize,
-    byteCount:  u64,   // running total bytes processed in current UBI chain
+    byteCount:  u64,
 };
 
-/// Process one full 64-byte UBI block.
-/// bytesDone = total bytes processed in this UBI chain AFTER this block.
-fn ubiBlock(ctx: *Skein512Ctxt, blk: []const u8, bytesDone: u64) void {
+fn ubiBlock(ctx: *Skein512Ctxt, blk: *const [SKEIN_512_BLOCK_BYTES]u8, bytesDone: u64) void {
     ctx.T[0] = bytesDone;
     ctx.T[2] = ctx.T[0] ^ ctx.T[1];
 
@@ -102,8 +89,7 @@ fn ubiBlock(ctx: *Skein512Ctxt, blk: []const u8, bytesDone: u64) void {
     threefish512(key, ctx.T, pt, &ct);
     for (0..8) |i| ctx.X[i] = ct[i] ^ pt[i];
 
-    // Clear FIRST flag after first block
-    ctx.T[1] &= ~T1_FIRST;
+    ctx.T[1] &= T1_FIRST_MASK;
 }
 
 pub fn skein512Init(ctx: *Skein512Ctxt, hashBitLen: usize) !void {
@@ -114,19 +100,14 @@ pub fn skein512Init(ctx: *Skein512Ctxt, hashBitLen: usize) !void {
     @memset(&ctx.X, 0);
     @memset(&ctx.b, 0);
 
-    // Build the 32-byte Skein configuration block (padded to 64 bytes)
     var cfg: [SKEIN_512_BLOCK_BYTES]u8 = [_]u8{0} ** SKEIN_512_BLOCK_BYTES;
-    // Schema ID: "SHA3" = 0x53484133, version 1 => 6-byte LE: 53 48 41 33 01 00
     cfg[0] = 0x53; cfg[1] = 0x48; cfg[2] = 0x41; cfg[3] = 0x33;
     cfg[4] = 0x01; cfg[5] = 0x00;
-    // Output length in bits, 8-byte LE at offset 8
     std.mem.writeInt(u64, cfg[8..16][0..8], @as(u64, hashBitLen), .little);
 
-    // Process config block: type=CFG, FIRST|FINAL, T0=32 (config is always 32 bytes)
     ctx.T[1] = (T_CFG << 56) | T1_FIRST | T1_FINAL;
     ubiBlock(ctx, &cfg, 32);
 
-    // Ready for message: type=MSG, FIRST set, T0 will be set per block
     ctx.T[1]      = (T_MSG << 56) | T1_FIRST;
     ctx.byteCount = 0;
 }
@@ -135,40 +116,35 @@ pub fn skein512Update(ctx: *Skein512Ctxt, msg: []const u8) void {
     if (msg.len == 0) return;
     var remaining = msg;
 
-    // Fill partial buffer first
     if (ctx.bCnt > 0) {
         const n = @min(SKEIN_512_BLOCK_BYTES - ctx.bCnt, remaining.len);
         @memcpy(ctx.b[ctx.bCnt..][0..n], remaining[0..n]);
         ctx.bCnt  += n;
         remaining  = remaining[n..];
-        // Only flush if there's more data coming (keep last block for Final)
         if (remaining.len == 0) return;
         ctx.byteCount += SKEIN_512_BLOCK_BYTES;
         ubiBlock(ctx, &ctx.b, ctx.byteCount);
         ctx.bCnt = 0;
     }
 
-    // Full blocks — but keep at least 1 byte for Final
     while (remaining.len > SKEIN_512_BLOCK_BYTES) {
         ctx.byteCount += SKEIN_512_BLOCK_BYTES;
         ubiBlock(ctx, remaining[0..SKEIN_512_BLOCK_BYTES], ctx.byteCount);
         remaining = remaining[SKEIN_512_BLOCK_BYTES..];
     }
 
-    // Buffer the remainder (may be 1..64 bytes)
     @memcpy(ctx.b[0..remaining.len], remaining);
     ctx.bCnt = remaining.len;
 }
 
 pub fn skein512Final(ctx: *Skein512Ctxt, hashVal: []u8) void {
-    // Pad last block with zeros and set FINAL flag
     if (ctx.bCnt < SKEIN_512_BLOCK_BYTES) @memset(ctx.b[ctx.bCnt..], 0);
     ctx.T[1] |= T1_FINAL;
     ctx.byteCount += ctx.bCnt;
     ubiBlock(ctx, &ctx.b, ctx.byteCount);
 
-    // Output transform: type=OUT, FIRST|FINAL, T0=8 (8-byte counter block)
-    var outBlk: [SKEIN_512_BLOCK_BYTES]u8 = [_]u8{0} ** SKEIN_512_BLOCK_BYTES;
+    // Output transform: counter block = 64 zero bytes, T0 = 8 (8-byte counter)
+    const outBlk = [_]u8{0} ** SKEIN_512_BLOCK_BYTES;
     ctx.T[1] = (T_OUT << 56) | T1_FIRST | T1_FINAL;
     ubiBlock(ctx, &outBlk, 8);
 
@@ -189,9 +165,7 @@ pub fn skein512Mining(in: [80]u8, out: *[64]u8) void {
     skein512(&in, out);
 }
 
-// -----------------------------------------------------------------------
-// KAT vectors from Skein 1.3 spec Appendix B
-// -----------------------------------------------------------------------
+// KAT vectors: Skein 1.3 spec Appendix B
 
 const kat_empty_exp = [64]u8{
     0xbc,0x5b,0x4c,0x50,0x92,0x55,0x19,0xc2, 0x90,0xcc,0x63,0x42,0x77,0xae,0x3d,0x62,
