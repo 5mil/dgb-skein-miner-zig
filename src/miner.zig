@@ -51,21 +51,19 @@ const WorkerCtx = struct {
     allocator:   std.mem.Allocator,
     nonce_start: u32,
     nonce_step:  u32,
-    en2:         u32,    // extra_nonce2 assigned to this worker
+    en2:         u32,
     found:       std.atomic.Value(bool),
     found_nonce: std.atomic.Value(u32),
     use_avx2:    bool,
 };
 
 fn workerFn(ctx: *WorkerCtx) void {
-    // Take a snapshot of the current job (RwLock-protected)
     var job = ctx.client.lockJob() orelse return;
     defer job.free(ctx.allocator);
 
     var target: [32]u8 = undefined;
     decodeTarget(job.nbits, &target);
 
-    // Pre-allocate yescrypt scratch (once per thread, ~4 MB)
     var scratch: ?yescrypt.ScratchBuf = if (ctx.algo == .yescrypt)
         yescrypt.ScratchBuf.init(ctx.allocator) catch return
     else null;
@@ -74,7 +72,6 @@ fn workerFn(ctx: *WorkerCtx) void {
     var nonce: u32 = ctx.nonce_start;
 
     if (ctx.use_avx2 and ctx.algo == .skein) {
-        // 4-way AVX2 path: process 4 nonces per iteration
         while (!ctx.found.load(.acquire) and !g_stop.load(.acquire)) {
             var h0: [80]u8 = undefined; var h1: [80]u8 = undefined;
             var h2: [80]u8 = undefined; var h3: [80]u8 = undefined;
@@ -98,7 +95,6 @@ fn workerFn(ctx: *WorkerCtx) void {
             if (nonce == ctx.nonce_start) break;
         }
     } else {
-        // Scalar path (Skein or yescrypt)
         while (!ctx.found.load(.acquire) and !g_stop.load(.acquire)) {
             var header: [80]u8 = undefined;
             buildHeader(&header, job.version, &job.prev_hash, &job.merkle_root,
@@ -129,8 +125,8 @@ fn workerFn(ctx: *WorkerCtx) void {
     }
 }
 
-// SIGINT handler -- sets g_stop so all threads exit cleanly.
-fn handleSigint(_: c_int) callconv(.C) void {
+// Zig 0.16: calling convention enum members are lowercase  (.c not .C)
+fn handleSigint(_: c_int) callconv(.c) void {
     g_stop.store(true, .release);
 }
 
@@ -142,8 +138,6 @@ pub fn runMiner(
     threads:   usize,
     algo:      Algo,
 ) !void {
-    // Install SIGINT handler (Linux; Windows uses SetConsoleCtrlHandler but
-    // the Windows build path goes through stratum_windows.zig anyway).
     const builtin_os = builtin.os.tag;
     if (builtin_os == .linux or builtin_os == .macos) {
         const sa = std.posix.Sigaction{
@@ -160,7 +154,6 @@ pub fn runMiner(
     else
         std.debug.print("[Miner] Scalar path | algo={s}\n", .{@tagName(algo)});
 
-    // Reconnection loop
     var reconnect_delay: u64 = 2;
     while (!g_stop.load(.acquire)) {
         std.debug.print("[Miner] Connecting {s}:{d}...\n", .{ host, port });
@@ -195,7 +188,6 @@ pub fn runMiner(
 
             const job = client.lockJob() orelse continue;
 
-            // Assign each thread a unique extra_nonce2 (simple counter)
             var ctxs    = allocator.alloc(WorkerCtx, threads) catch break :mineLoop;
             defer allocator.free(ctxs);
             var handles = allocator.alloc(std.Thread, threads) catch break :mineLoop;
@@ -213,9 +205,7 @@ pub fn runMiner(
                     .found_nonce = std.atomic.Value(u32).init(0),
                     .use_avx2    = use_avx2,
                 };
-                // Worker takes its own snapshot via lockJob() internally
             }
-            // Free the snapshot taken above -- workers make their own
             var j = job; j.free(allocator);
 
             for (0..threads) |t|
