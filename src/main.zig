@@ -1,5 +1,5 @@
-const std    = @import("std");
-const skein   = @import("skein.zig");
+const std     = @import("std");
+const skein    = @import("skein.zig");
 const yescrypt = @import("yescrypt.zig");
 const stratum  = @import("stratum.zig");
 const miner    = @import("miner.zig");
@@ -36,20 +36,20 @@ fn stripStratumPrefix(s: []const u8) []const u8 {
 }
 
 pub fn main(init: std.process.Init) !void {
-    var gpa = std.heap.DebugAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    // init.gpa is the leak-checking allocator in debug, fast in release
+    const allocator = init.gpa;
+    // init.arena is cleaned up automatically on exit
+    const arena = init.arena.allocator();
 
-    // Collect args using Zig 0.16 init.args API
-    var arg_iter = try init.minimal.args.iterateAllocator(allocator);
+    // Collect args into a slice using arena allocator
+    var arg_iter = try init.minimal.args.iterateAllocator(arena);
     defer arg_iter.deinit();
 
-    var args = std.ArrayList([]const u8).init(allocator);
-    defer args.deinit();
+    var arg_list = std.ArrayListUnmanaged([]const u8){};
     while (arg_iter.next()) |arg| {
-        try args.append(arg);
+        try arg_list.append(arena, arg);
     }
-    const argv = args.items;
+    const argv = arg_list.items;
 
     if (argv.len < 2) {
         printUsage();
