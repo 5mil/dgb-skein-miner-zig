@@ -1,5 +1,5 @@
-//! Real mining loop for DGB-Skein and DGB-YescryptR16.
-const std = @import("std");
+//! Mining loop for DGB Skein-512 and YescryptR16.
+const std      = @import("std");
 const skein    = @import("skein.zig");
 const yescrypt = @import("yescrypt.zig");
 const stratum  = @import("stratum.zig");
@@ -8,12 +8,8 @@ pub const Algo = enum { skein, yescrypt };
 
 fn buildHeader(
     out: *[80]u8,
-    version: u32,
-    prev_hash: *const [32]u8,
-    merkle_root: *const [32]u8,
-    ntime: u32,
-    nbits: u32,
-    nonce: u32,
+    version: u32, prev_hash: *const [32]u8, merkle_root: *const [32]u8,
+    ntime: u32, nbits: u32, nonce: u32,
 ) void {
     std.mem.writeInt(u32, out[0..4],   version,     .little);
     @memcpy(out[4..36],  prev_hash);
@@ -35,13 +31,13 @@ fn meetsTarget(digest: *const [32]u8, target: *const [32]u8) bool {
 
 fn decodeTarget(nbits: u32, out: *[32]u8) void {
     @memset(out, 0);
-    const exp: u8   = @as(u8, @truncate(nbits >> 24));
-    const mant: u32 = nbits & 0x00ff_ffff;
+    const exp: usize = @as(u8, @truncate(nbits >> 24));
+    const mant: u32  = nbits & 0x00ff_ffff;
     if (exp < 3 or exp > 32) return;
-    const byte_pos: usize = @as(usize, exp) - 3;
-    if (byte_pos + 2 < 32) out[byte_pos + 2] = @as(u8, @truncate(mant >> 16));
-    if (byte_pos + 1 < 32) out[byte_pos + 1] = @as(u8, @truncate(mant >>  8));
-    if (byte_pos     < 32) out[byte_pos    ] = @as(u8, @truncate(mant      ));
+    const bp = exp - 3;
+    if (bp + 2 < 32) out[bp + 2] = @truncate(mant >> 16);
+    if (bp + 1 < 32) out[bp + 1] = @truncate(mant >>  8);
+    if (bp     < 32) out[bp    ] = @truncate(mant      );
 }
 
 const WorkerCtx = struct {
@@ -56,18 +52,14 @@ const WorkerCtx = struct {
 
 fn workerFn(ctx: *WorkerCtx) void {
     const job = ctx.client.current_job orelse return;
-
     var target: [32]u8 = undefined;
     decodeTarget(job.nbits, &target);
-
     var header: [80]u8 = undefined;
     var digest: [64]u8 = undefined;
-
     var nonce: u32 = ctx.nonce_start;
     while (!ctx.found.load(.acquire)) {
         buildHeader(&header, job.version, &job.prev_hash, &job.merkle_root,
                     job.ntime, job.nbits, nonce);
-
         switch (ctx.algo) {
             .skein => {
                 skein.skein512(&header, &digest);
@@ -87,7 +79,6 @@ fn workerFn(ctx: *WorkerCtx) void {
                 }
             },
         }
-
         nonce +%= ctx.nonce_step;
         if (nonce == ctx.nonce_start) break;
     }
@@ -101,42 +92,33 @@ pub fn runMiner(
     algo: Algo,
 ) !void {
     _ = _wallet;
-    std.debug.print("[Miner] Starting | algo={s} threads={d}\n",
-        .{ @tagName(algo), threads });
-
+    std.debug.print("[Miner] Starting | algo={s} threads={d}\n", .{ @tagName(algo), threads });
     var line_buf: [8192]u8 = undefined;
-
     while (true) {
         const line = client.readLine(&line_buf) catch |err| {
             std.debug.print("[Miner] Read error: {}\n", .{err});
             break;
         } orelse break;
-
         try client.handleLine(line, allocator);
-
         const job = client.current_job orelse continue;
         _ = job;
-
         var ctxs = try allocator.alloc(WorkerCtx, threads);
         defer allocator.free(ctxs);
-        var thread_handles = try allocator.alloc(std.Thread, threads);
-        defer allocator.free(thread_handles);
-
+        var handles = try allocator.alloc(std.Thread, threads);
+        defer allocator.free(handles);
         for (0..threads) |t| {
-            ctxs[t] = WorkerCtx{
+            ctxs[t] = .{
                 .client      = client,
                 .algo        = algo,
                 .allocator   = allocator,
-                .nonce_start = @as(u32, @truncate(t)),
-                .nonce_step  = @as(u32, @truncate(threads)),
+                .nonce_start = @truncate(t),
+                .nonce_step  = @truncate(threads),
                 .found       = std.atomic.Value(bool).init(false),
                 .found_nonce = std.atomic.Value(u32).init(0),
             };
-            thread_handles[t] = try std.Thread.spawn(.{}, workerFn, .{&ctxs[t]});
+            handles[t] = try std.Thread.spawn(.{}, workerFn, .{&ctxs[t]});
         }
-
-        for (thread_handles) |h| h.join();
-
+        for (handles) |h| h.join();
         for (ctxs) |*c| {
             if (c.found.load(.acquire)) {
                 const nonce = c.found_nonce.load(.acquire);

@@ -13,18 +13,18 @@ fn printUsage() void {
         \\ZigRake -- DGB Skein / YescryptR16 miner
         \\
         \\Usage:
-        \\  rake                                         Run self-tests
-        \\  rake <160-hex>                               Hash single header (Skein)
+        \\  rake                                        Run self-tests
+        \\  rake <160-hex>                              Hash single header (Skein)
         \\  rake --mine <wallet> [options]
         \\
         \\Options:
         \\  --host <host>           Pool host  (default: americas.mining-dutch.nl)
         \\  --port <port>           Pool port  (default: 9994)
-        \\  --algo skein|yescrypt  Algorithm  (default: skein)
+        \\  --algo skein|yescrypt   Algorithm  (default: skein)
         \\  --threads <n>           Worker threads (default: 4)
         \\
         \\Example:
-        \\  rake --mine 5mil.worker55 --algo skein --threads 8
+        \\  rake --mine 5mil.worker55 --algo skein --threads 4
         \\
     , .{});
 }
@@ -35,24 +35,19 @@ fn stripStratumPrefix(s: []const u8) []const u8 {
     return s;
 }
 
+// Zig 0.16 "Juicy Main" -- init gives us allocators and args.
 pub fn main(init: std.process.Init) !void {
-    const allocator = init.gpa;
+    const gpa   = init.gpa;
     const arena = init.arena.allocator();
 
-    var arg_iter = try init.minimal.args.iterateAllocator(arena);
-    defer arg_iter.deinit();
-
-    var arg_list = std.ArrayListUnmanaged([]const u8).empty;
-    while (arg_iter.next()) |arg| {
-        try arg_list.append(arena, arg);
-    }
-    const argv = arg_list.items;
+    // toSlice returns []const []const u8 including argv[0]
+    const argv = try init.minimal.args.toSlice(arena);
 
     if (argv.len < 2) {
         printUsage();
         std.debug.print("=== Self-tests ===\n", .{});
         const sk_ok = skein.runKAT();
-        const ye_ok = yescrypt.selftest(allocator) catch false;
+        const ye_ok = yescrypt.selftest(gpa) catch false;
         std.debug.print("\n=== Available ===\n", .{});
         if (sk_ok) std.debug.print("  skein    [READY]\n", .{});
         if (ye_ok) std.debug.print("  yescrypt [READY]\n", .{});
@@ -72,30 +67,28 @@ pub fn main(init: std.process.Init) !void {
     if (!std.mem.eql(u8, argv[1], "--mine")) { printUsage(); std.process.exit(1); }
     if (argv.len < 3) { printUsage(); std.process.exit(1); }
 
-    const wallet = argv[2];
-    var host: []const u8 = DEFAULT_HOST;
-    var port: u16        = DEFAULT_PORT;
-    var algo: miner.Algo = .skein;
-    var threads: usize   = 4;
+    const wallet     = argv[2];
+    var host: []const u8  = DEFAULT_HOST;
+    var port: u16         = DEFAULT_PORT;
+    var algo: miner.Algo  = .skein;
+    var threads: usize    = 4;
 
     var i: usize = 3;
     while (i < argv.len) : (i += 1) {
         const a = argv[i];
-        if (std.mem.eql(u8, a, "--host") and i+1 < argv.len) {
+        if (std.mem.eql(u8, a, "--host") and i + 1 < argv.len) {
             i += 1; host = stripStratumPrefix(argv[i]);
-        } else if (std.mem.eql(u8, a, "--port") and i+1 < argv.len) {
+        } else if (std.mem.eql(u8, a, "--port") and i + 1 < argv.len) {
             i += 1; port = std.fmt.parseInt(u16, argv[i], 10) catch DEFAULT_PORT;
-        } else if (std.mem.eql(u8, a, "--algo") and i+1 < argv.len) {
+        } else if (std.mem.eql(u8, a, "--algo") and i + 1 < argv.len) {
             i += 1;
-            if (std.mem.eql(u8, argv[i], "yescrypt")) {
-                algo = .yescrypt;
-            } else if (std.mem.eql(u8, argv[i], "skein")) {
-                algo = .skein;
-            } else {
+            if      (std.mem.eql(u8, argv[i], "yescrypt")) algo = .yescrypt
+            else if (std.mem.eql(u8, argv[i], "skein"))    algo = .skein
+            else {
                 std.debug.print("Unknown algo: {s}\n", .{argv[i]});
                 std.process.exit(1);
             }
-        } else if (std.mem.eql(u8, a, "--threads") and i+1 < argv.len) {
+        } else if (std.mem.eql(u8, a, "--threads") and i + 1 < argv.len) {
             i += 1; threads = std.fmt.parseInt(usize, argv[i], 10) catch 4;
         }
     }
@@ -103,7 +96,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("=== Self-test [{s}] ===\n", .{@tagName(algo)});
     const ok: bool = switch (algo) {
         .skein    => skein.runKAT(),
-        .yescrypt => yescrypt.selftest(allocator) catch false,
+        .yescrypt => yescrypt.selftest(gpa) catch false,
     };
     if (!ok) {
         std.debug.print("[FATAL] Self-test failed. Aborting.\n", .{});
@@ -112,16 +105,16 @@ pub fn main(init: std.process.Init) !void {
 
     if (algo == .skein) {
         if (cpu.hasAvx2()) std.debug.print("[CPU] AVX2 active\n", .{})
-        else               std.debug.print("[CPU] Scalar path\n", .{});
+        else               std.debug.print("[CPU] Scalar path (aarch64)\n", .{});
     }
 
     std.debug.print("=== Connecting {s}:{d} | wallet={s} | threads={d} ===\n",
         .{ host, port, wallet, threads });
 
-    var client = try stratum.StratumClient.connect(allocator, host, port);
+    var client = try stratum.StratumClient.connect(gpa, host, port);
     defer client.deinit();
 
     try client.subscribe();
     try client.authorize(wallet, "x");
-    try miner.runMiner(allocator, &client, wallet, threads, algo);
+    try miner.runMiner(gpa, &client, wallet, threads, algo);
 }

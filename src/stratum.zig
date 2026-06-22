@@ -1,5 +1,6 @@
 //! Stratum v1 client for DGB pools.
-const std = @import("std");
+//! Uses std.posix sockets + std.c.getaddrinfo for Zig 0.16 (std.net removed).
+const std   = @import("std");
 const posix = std.posix;
 
 pub const Job = struct {
@@ -28,15 +29,16 @@ pub const StratumClient = struct {
         const host_z = try allocator.dupeZ(u8, host);
         defer allocator.free(host_z);
 
+        // std.c.addrinfo uses ai_ prefix field names (POSIX)
         const hints = std.c.addrinfo{
-            .flags     = 0,
-            .family    = std.c.AF.UNSPEC,
-            .socktype  = std.c.SOCK.STREAM,
-            .protocol  = 0,
-            .addrlen   = 0,
-            .addr      = null,
-            .canonname = null,
-            .next      = null,
+            .ai_flags     = 0,
+            .ai_family    = std.c.AF.UNSPEC,
+            .ai_socktype  = std.c.SOCK.STREAM,
+            .ai_protocol  = 0,
+            .ai_addrlen   = 0,
+            .ai_addr      = null,
+            .ai_canonname = null,
+            .ai_next      = null,
         };
         var res: ?*std.c.addrinfo = null;
         if (std.c.getaddrinfo(host_z.ptr, port_str.ptr, &hints, &res) != 0)
@@ -44,13 +46,13 @@ pub const StratumClient = struct {
         defer std.c.freeaddrinfo(res);
 
         var it = res;
-        while (it) |ai| : (it = ai.next) {
+        while (it) |ai| : (it = ai.ai_next) {
             const fd = posix.socket(
-                @intCast(ai.family),
+                @intCast(ai.ai_family),
                 posix.SOCK.STREAM,
                 posix.IPPROTO.TCP,
             ) catch continue;
-            posix.connect(fd, ai.addr.?, @intCast(ai.addrlen)) catch {
+            posix.connect(fd, ai.ai_addr.?, @intCast(ai.ai_addrlen)) catch {
                 posix.close(fd);
                 continue;
             };
@@ -68,15 +70,13 @@ pub const StratumClient = struct {
 
     fn writeAll(self: *StratumClient, data: []const u8) !void {
         var sent: usize = 0;
-        while (sent < data.len) {
+        while (sent < data.len)
             sent += try posix.send(self.fd, data[sent..], 0);
-        }
     }
 
     fn readByte(self: *StratumClient) !u8 {
         var b: [1]u8 = undefined;
-        const n = try posix.recv(self.fd, &b, 0);
-        if (n == 0) return error.ConnectionClosed;
+        if (try posix.recv(self.fd, &b, 0) == 0) return error.ConnectionClosed;
         return b[0];
     }
 
@@ -88,7 +88,7 @@ pub const StratumClient = struct {
             if (self.extra_nonce1.len > 0) self.allocator.free(self.extra_nonce1);
             self.extra_nonce1 = try self.allocator.dupe(u8, en1);
         }
-        std.debug.print("[Stratum] Subscribed. extra_nonce1={s}\n", .{self.extra_nonce1});
+        std.debug.print("[Stratum] Subscribed extra_nonce1={s}\n", .{self.extra_nonce1});
     }
 
     pub fn authorize(self: *StratumClient, user: []const u8, pass: []const u8) !void {
@@ -107,19 +107,16 @@ pub const StratumClient = struct {
     pub fn handleLine(self: *StratumClient, line: []const u8, allocator: std.mem.Allocator) !void {
         if (std.mem.indexOf(u8, line, "mining.notify") != null)
             try self.parseNotify(line, allocator)
-        else if (std.mem.indexOf(u8, line, "mining.set_difficulty") != null) {
-            // TODO: update difficulty
-        }
+        else if (std.mem.indexOf(u8, line, "mining.set_difficulty") != null) {}
     }
 
     pub fn parseNotify(self: *StratumClient, line: []const u8, allocator: std.mem.Allocator) !void {
-        const params_start = std.mem.indexOf(u8, line, "\"params\":") orelse return;
-        const arr_start = std.mem.indexOfPos(u8, line, params_start, "[") orelse return;
+        const ps = std.mem.indexOf(u8, line, "\"params\":") orelse return;
+        const as_ = std.mem.indexOfPos(u8, line, ps, "[") orelse return;
 
         var strings: [8][]const u8 = undefined;
         var count: usize = 0;
-        var pos: usize = arr_start + 1;
-
+        var pos: usize = as_ + 1;
         while (count < 8) {
             while (pos < line.len and (line[pos] == ' ' or line[pos] == ',')) pos += 1;
             if (pos >= line.len or line[pos] == ']') break;
