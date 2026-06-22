@@ -124,8 +124,6 @@ fn workerFn(ctx: *WorkerCtx) void {
     }
 }
 
-// Zig 0.16 linux: sigaction handler param is std.os.linux.SIG (a typed enum), not c_int.
-// Use SIG_DFL's type to extract the right fn signature portably.
 fn handleSigint(_: std.os.linux.SIG) callconv(.c) void {
     g_stop.store(true, .release);
 }
@@ -141,7 +139,7 @@ pub fn runMiner(
     if (builtin.os.tag == .linux or builtin.os.tag == .macos) {
         const sa = std.posix.Sigaction{
             .handler = .{ .handler = handleSigint },
-            .mask    = std.posix.empty_sigset,
+            .mask    = std.os.linux.empty_sigset,  // Zig 0.16: moved from std.posix
             .flags   = 0,
         };
         try std.posix.sigaction(std.posix.SIG.INT, &sa, null);
