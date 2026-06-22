@@ -1,5 +1,7 @@
 //! Stratum v1 client for DGB pools.
 const std = @import("std");
+const posix = std.posix;
+const os    = std.os;
 
 pub const Job = struct {
     job_id:      []const u8,
@@ -14,7 +16,7 @@ pub const Job = struct {
 };
 
 pub const StratumClient = struct {
-    fd:                std.posix.socket_t,
+    fd:                posix.socket_t,
     allocator:         std.mem.Allocator,
     current_job:       ?Job,
     extra_nonce1:      []u8,
@@ -22,22 +24,42 @@ pub const StratumClient = struct {
     username:          []u8,
 
     pub fn connect(allocator: std.mem.Allocator, host: []const u8, port: u16) !StratumClient {
-        const list = try std.net.getAddressList(allocator, host, port);
-        defer list.deinit();
-        if (list.addrs.len == 0) return error.HostNotFound;
+        // Build port string for getaddrinfo
+        var port_buf: [6]u8 = undefined;
+        const port_str = try std.fmt.bufPrintZ(&port_buf, "{d}", .{port});
 
-        var last_err: anyerror = error.HostNotFound;
-        for (list.addrs) |addr| {
-            const fd = std.posix.socket(
-                addr.any.family,
-                std.posix.SOCK.STREAM,
-                std.posix.IPPROTO.TCP,
-            ) catch |e| { last_err = e; continue; };
-            std.posix.connect(fd, &addr.any, addr.getOsSockLen()) catch |e| {
-                std.posix.close(fd);
-                last_err = e;
+        // Null-terminate host
+        const host_z = try allocator.dupeZ(u8, host);
+        defer allocator.free(host_z);
+
+        var hints = std.c.addrinfo{
+            .flags    = 0,
+            .family   = std.c.AF.UNSPEC,
+            .socktype = std.c.SOCK.STREAM,
+            .protocol = 0,
+            .addrlen  = 0,
+            .addr     = null,
+            .canonname = null,
+            .next     = null,
+        };
+        var res: ?*std.c.addrinfo = null;
+        const rc = std.c.getaddrinfo(host_z.ptr, port_str.ptr, &hints, &res);
+        if (rc != 0) return error.HostNotFound;
+        defer std.c.freeaddrinfo(res);
+
+        var it = res;
+        while (it) |ai| : (it = ai.next) {
+            const fd = posix.socket(
+                @intCast(ai.family),
+                posix.SOCK.STREAM,
+                posix.IPPROTO.TCP,
+            ) catch continue;
+
+            posix.connect(fd, ai.addr.?, @intCast(ai.addrlen)) catch {
+                posix.close(fd);
                 continue;
             };
+
             return StratumClient{
                 .fd                = fd,
                 .allocator         = allocator,
@@ -47,20 +69,20 @@ pub const StratumClient = struct {
                 .username          = try allocator.dupe(u8, ""),
             };
         }
-        return last_err;
+        return error.ConnectionFailed;
     }
 
     fn writeAll(self: *StratumClient, data: []const u8) !void {
         var sent: usize = 0;
         while (sent < data.len) {
-            const n = try std.posix.send(self.fd, data[sent..], 0);
+            const n = try posix.send(self.fd, data[sent..], 0);
             sent += n;
         }
     }
 
     fn readByte(self: *StratumClient) !u8 {
         var b: [1]u8 = undefined;
-        const n = try std.posix.recv(self.fd, &b, 0);
+        const n = try posix.recv(self.fd, &b, 0);
         if (n == 0) return error.ConnectionClosed;
         return b[0];
     }
@@ -69,7 +91,7 @@ pub const StratumClient = struct {
         const msg = "{\"id\":1,\"method\":\"mining.subscribe\",\"params\":[\"ZigRake/1.0\"]}\n";
         try self.writeAll(msg);
         var buf: [4096]u8 = undefined;
-        const n = try std.posix.recv(self.fd, &buf, 0);
+        const n = try posix.recv(self.fd, &buf, 0);
         const rsp = buf[0..n];
         if (extractJsonString(rsp, "extra_nonce1")) |en1| {
             if (self.extra_nonce1.len > 0) self.allocator.free(self.extra_nonce1);
@@ -87,7 +109,7 @@ pub const StratumClient = struct {
             .{ user, pass });
         try self.writeAll(msg);
         var rbuf: [4096]u8 = undefined;
-        _ = try std.posix.recv(self.fd, &rbuf, 0);
+        _ = try posix.recv(self.fd, &rbuf, 0);
         std.debug.print("[Stratum] Authorized as {s}\n", .{user});
     }
 
@@ -177,7 +199,7 @@ pub const StratumClient = struct {
     }
 
     pub fn deinit(self: *StratumClient) void {
-        std.posix.close(self.fd);
+        posix.close(self.fd);
         if (self.current_job) |j| self.allocator.free(j.job_id);
         if (self.extra_nonce1.len > 0) self.allocator.free(self.extra_nonce1);
         if (self.username.len > 0)     self.allocator.free(self.username);
