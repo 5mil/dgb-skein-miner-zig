@@ -1,8 +1,8 @@
-//! Stratum v1 client -- Linux/Android (aarch64-linux-musl, x86_64-linux-*)
-//! Uses std.posix sockets + std.os.linux.getaddrinfo
+//! Stratum v1 client -- Linux (x86_64-linux-musl, aarch64-linux-musl)
+//! Uses std.net.getAddressList for DNS -- no libc getaddrinfo needed.
 const std   = @import("std");
 const posix = std.posix;
-const linux = std.os.linux;
+const net   = std.net;
 
 pub const Job = struct {
     job_id:      []const u8,
@@ -25,34 +25,17 @@ pub const StratumClient = struct {
     username:          []u8,
 
     pub fn connect(allocator: std.mem.Allocator, host: []const u8, port: u16) !StratumClient {
-        var port_buf: [6]u8 = undefined;
-        const port_str = try std.fmt.bufPrintZ(&port_buf, "{d}", .{port});
-        const host_z = try allocator.dupeZ(u8, host);
-        defer allocator.free(host_z);
+        // std.net.getAddressList does its own DNS resolution with no libc dep.
+        const list = try net.getAddressList(allocator, host, port);
+        defer list.deinit();
 
-        const hints = linux.addrinfo{
-            .flags     = linux.AI{},
-            .family    = linux.AF.UNSPEC,
-            .socktype  = linux.SOCK.STREAM,
-            .protocol  = 0,
-            .addrlen   = 0,
-            .addr      = null,
-            .canonname = null,
-            .next      = null,
-        };
-        var res: ?*linux.addrinfo = null;
-        if (linux.getaddrinfo(host_z.ptr, port_str.ptr, &hints, &res) != 0)
-            return error.HostNotFound;
-        defer linux.freeaddrinfo(res);
-
-        var it: ?*linux.addrinfo = res;
-        while (it) |ai| : (it = ai.next) {
+        for (list.addrs) |addr| {
             const fd = posix.socket(
-                @intCast(ai.family),
+                addr.any.family,
                 posix.SOCK.STREAM,
                 posix.IPPROTO.TCP,
             ) catch continue;
-            posix.connect(fd, ai.addr.?, @intCast(ai.addrlen)) catch {
+            posix.connect(fd, &addr.any, addr.getOsSockLen()) catch {
                 posix.close(fd);
                 continue;
             };
