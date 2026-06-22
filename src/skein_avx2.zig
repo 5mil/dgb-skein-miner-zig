@@ -95,57 +95,45 @@ pub fn skein512Avx2_4way(
         0x991112C71A75B523, 0xAE18A40B660FCC33,
     };
 
-    const ins = [_][]const u8{ in0, in1, in2, in3 };
+    const ins  = [_][]const u8{ in0, in1, in2, in3 };
     const outs = [_][]u8{ out0, out1, out2, out3 };
 
     var state: [8]Vec4 = undefined;
-    for (0..8) |i| {
-        state[i] = @splat(IV512[i]);
-    }
+    for (0..8) |i| state[i] = @as(Vec4, @splat(IV512[i]));
 
-    // Block 1
+    // Block 1: bytes 0..63
     var blk: [8]Vec4 = undefined;
     for (0..8) |i| {
         var w: [4]u64 = undefined;
-        for (0..4) |lane| {
-            w[lane] = std.mem.readInt(u64, ins[lane][i*8..][0..8], .little);
-        }
+        for (0..4) |lane| w[lane] = std.mem.readInt(u64, ins[lane][i*8..][0..8], .little);
         blk[i] = Vec4{ w[0], w[1], w[2], w[3] };
     }
-
-    var tw1: [3]u64 = .{ 64, (SKEIN_BLK_TYPE_MSG << 56) | SKEIN_T1_POS_FIRST, 0 };
+    var tw1 = [3]u64{ 64, (SKEIN_BLK_TYPE_MSG << 56) | SKEIN_T1_POS_FIRST, 0 };
     tw1[2] = tw1[0] ^ tw1[1];
     ubiProcessBlockAvx2(&state, blk, tw1);
 
-    // Block 2
+    // Block 2: bytes 64..79 (padded)
     var blk2: [8]Vec4 = undefined;
     for (0..8) |i| {
         var w: [4]u64 = undefined;
         for (0..4) |lane| {
-            if (i < 2) {
-                w[lane] = std.mem.readInt(u64, ins[lane][64 + i*8..][0..8], .little);
-            } else {
-                w[lane] = 0;
-            }
+            w[lane] = if (i < 2) std.mem.readInt(u64, ins[lane][64 + i*8..][0..8], .little) else 0;
         }
         blk2[i] = Vec4{ w[0], w[1], w[2], w[3] };
     }
-
-    var tw2: [3]u64 = .{ 80, (SKEIN_BLK_TYPE_MSG << 56) | SKEIN_T1_POS_FINAL, 0 };
+    var tw2 = [3]u64{ 80, (SKEIN_BLK_TYPE_MSG << 56) | SKEIN_T1_POS_FINAL, 0 };
     tw2[2] = tw2[0] ^ tw2[1];
     ubiProcessBlockAvx2(&state, blk2, tw2);
 
-    // Output
-    var oblk: [8]Vec4 = .{ @splat(0) } ** 8;
-    var tw3: [3]u64 = .{ 8, (SKEIN_BLK_TYPE_OUT << 56) | SKEIN_T1_POS_FIRST | SKEIN_T1_POS_FINAL, 0 };
+    // Output transform
+    const oblk: [8]Vec4 = [_]Vec4{@as(Vec4, @splat(@as(u64, 0)))} ** 8;
+    var tw3 = [3]u64{ 8, (SKEIN_BLK_TYPE_OUT << 56) | SKEIN_T1_POS_FIRST | SKEIN_T1_POS_FINAL, 0 };
     tw3[2] = tw3[0] ^ tw3[1];
     ubiProcessBlockAvx2(&state, oblk, tw3);
 
     for (0..8) |i| {
         const tmp = @as([4]u64, state[i]);
-        for (0..4) |lane| {
-            std.mem.writeInt(u64, outs[lane][i*8..][0..8], tmp[lane], .little);
-        }
+        for (0..4) |lane| std.mem.writeInt(u64, outs[lane][i*8..][0..8], tmp[lane], .little);
     }
 }
 

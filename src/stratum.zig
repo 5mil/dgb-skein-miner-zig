@@ -63,7 +63,6 @@ pub const StratumClient = struct {
         std.debug.print("[Stratum] Authorized as {s}\n", .{user});
     }
 
-    /// Route an incoming Stratum line to the correct handler.
     pub fn handleLine(self: *StratumClient, line: []const u8, allocator: std.mem.Allocator) !void {
         if (std.mem.indexOf(u8, line, "mining.notify") != null) {
             try self.parseNotify(line, allocator);
@@ -72,7 +71,6 @@ pub const StratumClient = struct {
         }
     }
 
-    /// Parse a mining.notify line and update current_job.
     pub fn parseNotify(self: *StratumClient, line: []const u8, allocator: std.mem.Allocator) !void {
         const params_start = std.mem.indexOf(u8, line, "\"params\":") orelse return;
         const arr_start = std.mem.indexOfPos(u8, line, params_start, "[") orelse return;
@@ -110,9 +108,6 @@ pub const StratumClient = struct {
         const version = std.fmt.parseInt(u32, ver_hex,   16) catch 0x20000000;
         const nbits   = std.fmt.parseInt(u32, nbits_hex, 16) catch 0;
         const ntime   = std.fmt.parseInt(u32, ntime_hex, 16) catch 0;
-
-        var merkle_root: [32]u8 = [_]u8{0} ** 32;
-        _ = merkle_root; // TODO: sha256d merkle walk
 
         if (self.current_job) |j| allocator.free(j.job_id);
 

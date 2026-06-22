@@ -119,40 +119,36 @@ fn blockMix(B: []u32, Y: []u32) void {
 }
 
 // -----------------------------------------------------------------------
-// SMix (yescrypt YESCRYPT_RW variant)
+// SMix
 // -----------------------------------------------------------------------
 
 const N: u64 = 2048;
 
 fn smix(B: []u8, allocator: std.mem.Allocator) !void {
     const bw = BLOCK_WORDS;
-    var X = try allocator.alloc(u32, bw);
+    const X = try allocator.alloc(u32, bw);
     defer allocator.free(X);
-    var Y = try allocator.alloc(u32, bw);
+    const Y = try allocator.alloc(u32, bw);
     defer allocator.free(Y);
-    var V = try allocator.alloc(u32, N * bw);
+    const V = try allocator.alloc(u32, N * bw);
     defer allocator.free(V);
 
-    // Load B into X (little-endian)
     for (0..bw) |i| {
         X[i] = std.mem.readInt(u32, B[i*4..][0..4], .little);
     }
 
-    // Fill phase
     for (0..N) |i| {
         @memcpy(V[i*bw .. i*bw+bw], X);
         blockMix(X, Y);
     }
 
-    // Mix phase (RW: update V in place)
     for (0..N) |_| {
         const j: u64 = @as(u64, X[bw - BLOCK_WORDS % bw + (bw - 16)]) & (N - 1);
         for (0..bw) |k| X[k] ^= V[j*bw + k];
         blockMix(X, Y);
-        @memcpy(V[j*bw .. j*bw+bw], X);  // RW write-back
+        @memcpy(V[j*bw .. j*bw+bw], X);
     }
 
-    // Store X back to B
     for (0..bw) |i| {
         std.mem.writeInt(u32, B[i*4..][0..4], X[i], .little);
     }
@@ -162,22 +158,15 @@ fn smix(B: []u8, allocator: std.mem.Allocator) !void {
 // Public API
 // -----------------------------------------------------------------------
 
-/// Hash an 80-byte block header with yescryptR16.
-/// Caller must provide an allocator (SMix needs ~2 MB scratch).
 pub fn yescryptR16(header: *const [80]u8, out: *[32]u8, allocator: std.mem.Allocator) !void {
     const p: u32 = 1;
     const blen: usize = @as(usize, p) * @as(usize, BLOCK_BYTES);
 
-    var B = try allocator.alloc(u8, blen);
+    const B = try allocator.alloc(u8, blen);
     defer allocator.free(B);
 
-    // Initial PBKDF2: password=header, salt=header -> B
     pbkdf2Sha256(header, header, B);
-
-    // SMix
     try smix(B, allocator);
-
-    // Final PBKDF2: password=header, salt=B -> out
     pbkdf2Sha256(header, B, out);
 }
 
@@ -185,11 +174,8 @@ pub fn yescryptR16(header: *const [80]u8, out: *[32]u8, allocator: std.mem.Alloc
 // Self-test
 // -----------------------------------------------------------------------
 
-/// Returns true if the zero-header vector matches.
-/// Expected value derived from reference yescryptR16(\x00 * 80).
 pub fn selftest(allocator: std.mem.Allocator) !bool {
     const zero: [80]u8 = [_]u8{0} ** 80;
-    // Expected: yescryptR16(zeros) -- byte-array, no hex parsing
     const expected = [32]u8{
         0x8e,0x2c,0x41,0x5e,0x3e,0xf2,0x2a,0x44,
         0x4a,0x7f,0x14,0x3e,0x1e,0x30,0xcd,0xb4,
