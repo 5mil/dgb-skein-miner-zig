@@ -125,8 +125,13 @@ fn workerFn(ctx: *WorkerCtx) void {
     }
 }
 
-// Zig 0.16: calling convention enum members are lowercase  (.c not .C)
-fn handleSigint(_: c_int) callconv(.c) void {
+// Zig 0.16 on Linux: sigaction handler receives os.linux.SIG__enum_*, not c_int.
+// Derive the exact fn type from the Sigaction struct so we never get it wrong again.
+const SigHandlerFn = std.meta.Child(
+    @TypeOf(@as(std.posix.Sigaction, undefined).handler.handler)
+);
+
+fn handleSigint(_: SigHandlerFn.@"0") callconv(.c) void {
     g_stop.store(true, .release);
 }
 
