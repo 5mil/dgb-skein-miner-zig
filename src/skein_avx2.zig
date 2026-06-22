@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const Vec4 = @Vector(4, u64);
 
@@ -22,6 +23,7 @@ fn rot64(v: Vec4, n: u32) Vec4 {
     const shift: @Vector(4, u6) = @splat(@as(u6, @truncate(n)));
     return (v << shift) | (v >> @as(@Vector(4, u6), @splat(@as(u6, @truncate(64 - n)))));
 }
+_ = rot64; // suppress unused warning -- used only when AVX2 active
 
 fn ubiProcessBlockAvx2(state: *[8]Vec4, block: [8]Vec4, tweak: [3]u64) void {
     var st: [4][8]u64 = undefined;
@@ -59,10 +61,10 @@ fn ubiProcessBlockAvx2(state: *[8]Vec4, block: [8]Vec4, tweak: [3]u64) void {
             const rm = r % 8;
             const rc = RC[rm];
 
-            v[0] +%= v[1]; v[1] = ((v[1] << rc[0]) | (v[1] >> (64 - rc[0]))) ^ v[0];
-            v[2] +%= v[3]; v[3] = ((v[3] << rc[1]) | (v[3] >> (64 - rc[1]))) ^ v[2];
-            v[4] +%= v[5]; v[5] = ((v[5] << rc[2]) | (v[5] >> (64 - rc[2]))) ^ v[4];
-            v[6] +%= v[7]; v[7] = ((v[7] << rc[3]) | (v[7] >> (64 - rc[3]))) ^ v[6];
+            v[0] +%= v[1]; v[1] = ((v[1] << @as(u6,@truncate(rc[0]))) | (v[1] >> @as(u6,@truncate(64-rc[0])))) ^ v[0];
+            v[2] +%= v[3]; v[3] = ((v[3] << @as(u6,@truncate(rc[1]))) | (v[3] >> @as(u6,@truncate(64-rc[1])))) ^ v[2];
+            v[4] +%= v[5]; v[5] = ((v[5] << @as(u6,@truncate(rc[2]))) | (v[5] >> @as(u6,@truncate(64-rc[2])))) ^ v[4];
+            v[6] +%= v[7]; v[7] = ((v[7] << @as(u6,@truncate(rc[3]))) | (v[7] >> @as(u6,@truncate(64-rc[3])))) ^ v[6];
 
             var t: [8]u64 = undefined;
             for (0..8) |i| t[PERM[i]] = v[i];
@@ -101,7 +103,6 @@ pub fn skein512Avx2_4way(
     var state: [8]Vec4 = undefined;
     for (0..8) |i| state[i] = @as(Vec4, @splat(IV512[i]));
 
-    // Block 1: bytes 0..63
     var blk: [8]Vec4 = undefined;
     for (0..8) |i| {
         var w: [4]u64 = undefined;
@@ -112,7 +113,6 @@ pub fn skein512Avx2_4way(
     tw1[2] = tw1[0] ^ tw1[1];
     ubiProcessBlockAvx2(&state, blk, tw1);
 
-    // Block 2: bytes 64..79 (padded)
     var blk2: [8]Vec4 = undefined;
     for (0..8) |i| {
         var w: [4]u64 = undefined;
@@ -125,7 +125,6 @@ pub fn skein512Avx2_4way(
     tw2[2] = tw2[0] ^ tw2[1];
     ubiProcessBlockAvx2(&state, blk2, tw2);
 
-    // Output transform
     const oblk: [8]Vec4 = [_]Vec4{@as(Vec4, @splat(@as(u64, 0)))} ** 8;
     var tw3 = [3]u64{ 8, (SKEIN_BLK_TYPE_OUT << 56) | SKEIN_T1_POS_FIRST | SKEIN_T1_POS_FINAL, 0 };
     tw3[2] = tw3[0] ^ tw3[1];
@@ -135,11 +134,4 @@ pub fn skein512Avx2_4way(
         const tmp = @as([4]u64, state[i]);
         for (0..4) |lane| std.mem.writeInt(u64, outs[lane][i*8..][0..8], tmp[lane], .little);
     }
-}
-
-pub fn hasAvx2() bool {
-    return std.Target.x86.featureSetHas(
-        std.Target.Cpu.Arch.x86_64.featureSet(),
-        .avx2
-    );
 }

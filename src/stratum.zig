@@ -1,7 +1,6 @@
 //! Stratum v1 client for DGB pools.
 const std = @import("std");
 const posix = std.posix;
-const os    = std.os;
 
 pub const Job = struct {
     job_id:      []const u8,
@@ -24,27 +23,24 @@ pub const StratumClient = struct {
     username:          []u8,
 
     pub fn connect(allocator: std.mem.Allocator, host: []const u8, port: u16) !StratumClient {
-        // Build port string for getaddrinfo
         var port_buf: [6]u8 = undefined;
         const port_str = try std.fmt.bufPrintZ(&port_buf, "{d}", .{port});
-
-        // Null-terminate host
         const host_z = try allocator.dupeZ(u8, host);
         defer allocator.free(host_z);
 
-        var hints = std.c.addrinfo{
-            .flags    = 0,
-            .family   = std.c.AF.UNSPEC,
-            .socktype = std.c.SOCK.STREAM,
-            .protocol = 0,
-            .addrlen  = 0,
-            .addr     = null,
+        const hints = std.c.addrinfo{
+            .flags     = 0,
+            .family    = std.c.AF.UNSPEC,
+            .socktype  = std.c.SOCK.STREAM,
+            .protocol  = 0,
+            .addrlen   = 0,
+            .addr      = null,
             .canonname = null,
-            .next     = null,
+            .next      = null,
         };
         var res: ?*std.c.addrinfo = null;
-        const rc = std.c.getaddrinfo(host_z.ptr, port_str.ptr, &hints, &res);
-        if (rc != 0) return error.HostNotFound;
+        if (std.c.getaddrinfo(host_z.ptr, port_str.ptr, &hints, &res) != 0)
+            return error.HostNotFound;
         defer std.c.freeaddrinfo(res);
 
         var it = res;
@@ -54,12 +50,10 @@ pub const StratumClient = struct {
                 posix.SOCK.STREAM,
                 posix.IPPROTO.TCP,
             ) catch continue;
-
             posix.connect(fd, ai.addr.?, @intCast(ai.addrlen)) catch {
                 posix.close(fd);
                 continue;
             };
-
             return StratumClient{
                 .fd                = fd,
                 .allocator         = allocator,
@@ -75,8 +69,7 @@ pub const StratumClient = struct {
     fn writeAll(self: *StratumClient, data: []const u8) !void {
         var sent: usize = 0;
         while (sent < data.len) {
-            const n = try posix.send(self.fd, data[sent..], 0);
-            sent += n;
+            sent += try posix.send(self.fd, data[sent..], 0);
         }
     }
 
@@ -88,12 +81,10 @@ pub const StratumClient = struct {
     }
 
     pub fn subscribe(self: *StratumClient) !void {
-        const msg = "{\"id\":1,\"method\":\"mining.subscribe\",\"params\":[\"ZigRake/1.0\"]}\n";
-        try self.writeAll(msg);
+        try self.writeAll("{\"id\":1,\"method\":\"mining.subscribe\",\"params\":[\"ZigRake/1.0\"]}\n");
         var buf: [4096]u8 = undefined;
         const n = try posix.recv(self.fd, &buf, 0);
-        const rsp = buf[0..n];
-        if (extractJsonString(rsp, "extra_nonce1")) |en1| {
+        if (extractJsonString(buf[0..n], "extra_nonce1")) |en1| {
             if (self.extra_nonce1.len > 0) self.allocator.free(self.extra_nonce1);
             self.extra_nonce1 = try self.allocator.dupe(u8, en1);
         }
@@ -114,9 +105,9 @@ pub const StratumClient = struct {
     }
 
     pub fn handleLine(self: *StratumClient, line: []const u8, allocator: std.mem.Allocator) !void {
-        if (std.mem.indexOf(u8, line, "mining.notify") != null) {
-            try self.parseNotify(line, allocator);
-        } else if (std.mem.indexOf(u8, line, "mining.set_difficulty") != null) {
+        if (std.mem.indexOf(u8, line, "mining.notify") != null)
+            try self.parseNotify(line, allocator)
+        else if (std.mem.indexOf(u8, line, "mining.set_difficulty") != null) {
             // TODO: update difficulty
         }
     }
@@ -143,37 +134,24 @@ pub const StratumClient = struct {
                 while (pos < line.len and line[pos] != ',' and line[pos] != ']') pos += 1;
             }
         }
-
         if (count < 5) return;
 
-        const job_id    = strings[0];
-        const prevhash  = strings[1];
-        const ver_hex   = strings[2];
-        const nbits_hex = strings[3];
-        const ntime_hex = strings[4];
-
         var prev_hash: [32]u8 = [_]u8{0} ** 32;
-        if (prevhash.len == 64) hexDecode(prevhash, &prev_hash) catch {};
-
-        const version = std.fmt.parseInt(u32, ver_hex,   16) catch 0x20000000;
-        const nbits   = std.fmt.parseInt(u32, nbits_hex, 16) catch 0;
-        const ntime   = std.fmt.parseInt(u32, ntime_hex, 16) catch 0;
+        if (strings[1].len == 64) hexDecode(strings[1], &prev_hash) catch {};
 
         if (self.current_job) |j| allocator.free(j.job_id);
-
         self.current_job = Job{
-            .job_id      = try allocator.dupe(u8, job_id),
+            .job_id      = try allocator.dupe(u8, strings[0]),
             .prev_hash   = prev_hash,
             .merkle_root = [_]u8{0} ** 32,
             .coinb1      = "",
             .coinb2      = "",
-            .version     = version,
-            .nbits       = nbits,
-            .ntime       = ntime,
+            .version     = std.fmt.parseInt(u32, strings[2], 16) catch 0x20000000,
+            .nbits       = std.fmt.parseInt(u32, strings[3], 16) catch 0,
+            .ntime       = std.fmt.parseInt(u32, strings[4], 16) catch 0,
             .clean_jobs  = true,
         };
-        std.debug.print("[Stratum] Job: {s}  nbits=0x{x:0>8}  ntime=0x{x:0>8}\n",
-            .{ job_id, nbits, ntime });
+        std.debug.print("[Stratum] Job: {s}\n", .{strings[0]});
     }
 
     pub fn submitShare(self: *StratumClient, job_id: []const u8, nonce: u32, ntime: u32) !void {
@@ -208,14 +186,13 @@ pub const StratumClient = struct {
 
 fn hexDecode(hex: []const u8, out: []u8) !void {
     if (hex.len != out.len * 2) return error.BadHexLen;
-    for (0..out.len) |i| {
+    for (0..out.len) |i|
         out[i] = try std.fmt.parseInt(u8, hex[i*2..][0..2], 16);
-    }
 }
 
 fn extractJsonString(json: []const u8, key: []const u8) ?[]const u8 {
-    var search_buf: [64]u8 = undefined;
-    const needle = std.fmt.bufPrint(&search_buf, "\"{s}\":\"", .{key}) catch return null;
+    var buf: [64]u8 = undefined;
+    const needle = std.fmt.bufPrint(&buf, "\"{s}\":\"", .{key}) catch return null;
     const start = std.mem.indexOf(u8, json, needle) orelse return null;
     const vs = start + needle.len;
     const ve = std.mem.indexOfPos(u8, json, vs, "\"") orelse return null;

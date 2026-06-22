@@ -1,22 +1,11 @@
 //! Real mining loop for DGB-Skein and DGB-YescryptR16.
-//! Builds 80-byte headers, scans nonces, checks target, submits shares.
-
 const std = @import("std");
-const skein     = @import("skein.zig");
-const skein_avx2 = @import("skein_avx2.zig");
-const yescrypt  = @import("yescrypt.zig");
-const stratum   = @import("stratum.zig");
+const skein    = @import("skein.zig");
+const yescrypt = @import("yescrypt.zig");
+const stratum  = @import("stratum.zig");
 
 pub const Algo = enum { skein, yescrypt };
 
-/// Build an 80-byte block header from Stratum job fields.
-/// Layout (Bitcoin/DGB little-endian):
-///   [0..4]   version  (LE u32)
-///   [4..36]  prev_hash (32 bytes, as-is from pool)
-///   [36..68] merkle_root (32 bytes, computed by caller or from job)
-///   [68..72] ntime  (LE u32)
-///   [72..76] nbits  (LE u32)
-///   [76..80] nonce  (LE u32)
 fn buildHeader(
     out: *[80]u8,
     version: u32,
@@ -26,31 +15,27 @@ fn buildHeader(
     nbits: u32,
     nonce: u32,
 ) void {
-    std.mem.writeInt(u32, out[0..4],   version,   .little);
+    std.mem.writeInt(u32, out[0..4],   version,     .little);
     @memcpy(out[4..36],  prev_hash);
     @memcpy(out[36..68], merkle_root);
-    std.mem.writeInt(u32, out[68..72], ntime,     .little);
-    std.mem.writeInt(u32, out[72..76], nbits,     .little);
-    std.mem.writeInt(u32, out[76..80], nonce,     .little);
+    std.mem.writeInt(u32, out[68..72], ntime,       .little);
+    std.mem.writeInt(u32, out[72..76], nbits,       .little);
+    std.mem.writeInt(u32, out[76..80], nonce,       .little);
 }
 
-/// Read u256 from 32-byte little-endian digest for target comparison.
-/// Returns true if digest <= target (share is valid).
 fn meetsTarget(digest: *const [32]u8, target: *const [32]u8) bool {
-    // Compare big-endian: digest[31] is most-significant byte
     var i: usize = 32;
     while (i > 0) {
         i -= 1;
         if (digest[i] < target[i]) return true;
         if (digest[i] > target[i]) return false;
     }
-    return true; // equal
+    return true;
 }
 
-/// Decode nbits compact target into 32-byte little-endian target.
 fn decodeTarget(nbits: u32, out: *[32]u8) void {
     @memset(out, 0);
-    const exp: u8  = @as(u8, @truncate(nbits >> 24));
+    const exp: u8   = @as(u8, @truncate(nbits >> 24));
     const mant: u32 = nbits & 0x00ff_ffff;
     if (exp < 3 or exp > 32) return;
     const byte_pos: usize = @as(usize, exp) - 3;
@@ -104,7 +89,7 @@ fn workerFn(ctx: *WorkerCtx) void {
         }
 
         nonce +%= ctx.nonce_step;
-        if (nonce == ctx.nonce_start) break; // full wrap -- exhausted
+        if (nonce == ctx.nonce_start) break;
     }
 }
 
@@ -122,7 +107,6 @@ pub fn runMiner(
     var line_buf: [8192]u8 = undefined;
 
     while (true) {
-        // Read next Stratum line from pool
         const line = client.readLine(&line_buf) catch |err| {
             std.debug.print("[Miner] Read error: {}\n", .{err});
             break;
@@ -133,7 +117,6 @@ pub fn runMiner(
         const job = client.current_job orelse continue;
         _ = job;
 
-        // Spawn worker threads
         var ctxs = try allocator.alloc(WorkerCtx, threads);
         defer allocator.free(ctxs);
         var thread_handles = try allocator.alloc(std.Thread, threads);
@@ -154,7 +137,6 @@ pub fn runMiner(
 
         for (thread_handles) |h| h.join();
 
-        // Check if any worker found a share
         for (ctxs) |*c| {
             if (c.found.load(.acquire)) {
                 const nonce = c.found_nonce.load(.acquire);
