@@ -36,16 +36,13 @@ fn stripStratumPrefix(s: []const u8) []const u8 {
 }
 
 pub fn main(init: std.process.Init) !void {
-    // init.gpa is the leak-checking allocator in debug, fast in release
     const allocator = init.gpa;
-    // init.arena is cleaned up automatically on exit
     const arena = init.arena.allocator();
 
-    // Collect args into a slice using arena allocator
     var arg_iter = try init.minimal.args.iterateAllocator(arena);
     defer arg_iter.deinit();
 
-    var arg_list = std.ArrayListUnmanaged([]const u8){};
+    var arg_list = std.ArrayListUnmanaged([]const u8).empty;
     while (arg_iter.next()) |arg| {
         try arg_list.append(arena, arg);
     }
