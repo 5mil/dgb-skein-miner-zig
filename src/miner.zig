@@ -1,46 +1,168 @@
-const std = @import("std");
-const stratum = @import("stratum.zig");
+//! Real mining loop for DGB-Skein and DGB-YescryptR16.
+//! Builds 80-byte headers, scans nonces, checks target, submits shares.
 
-/// Production mining coordinator.
-/// 
-/// Current capabilities:
-/// - Connects to Stratum and maintains session
-/// - Can submit shares when a valid nonce is found
-///
-/// Future work (clearly marked):
-/// - Real block header construction from Job data
-/// - Multi-threaded nonce scanning using skein.skein512Mining()
-/// - Proper difficulty target checking
+const std = @import("std");
+const skein     = @import("skein.zig");
+const skein_avx2 = @import("skein_avx2.zig");
+const yescrypt  = @import("yescrypt.zig");
+const stratum   = @import("stratum.zig");
+
+pub const Algo = enum { skein, yescrypt };
+
+/// Build an 80-byte block header from Stratum job fields.
+/// Layout (Bitcoin/DGB little-endian):
+///   [0..4]   version  (LE u32)
+///   [4..36]  prev_hash (32 bytes, as-is from pool)
+///   [36..68] merkle_root (32 bytes, computed by caller or from job)
+///   [68..72] ntime  (LE u32)
+///   [72..76] nbits  (LE u32)
+///   [76..80] nonce  (LE u32)
+fn buildHeader(
+    out: *[80]u8,
+    version: u32,
+    prev_hash: *const [32]u8,
+    merkle_root: *const [32]u8,
+    ntime: u32,
+    nbits: u32,
+    nonce: u32,
+) void {
+    std.mem.writeInt(u32, out[0..4],   version,   .little);
+    @memcpy(out[4..36],  prev_hash);
+    @memcpy(out[36..68], merkle_root);
+    std.mem.writeInt(u32, out[68..72], ntime,     .little);
+    std.mem.writeInt(u32, out[72..76], nbits,     .little);
+    std.mem.writeInt(u32, out[76..80], nonce,     .little);
+}
+
+/// Read u256 from 32-byte little-endian digest for target comparison.
+/// Returns true if digest <= target (share is valid).
+fn meetsTarget(digest: *const [32]u8, target: *const [32]u8) bool {
+    // Compare big-endian: digest[31] is most-significant byte
+    var i: usize = 32;
+    while (i > 0) {
+        i -= 1;
+        if (digest[i] < target[i]) return true;
+        if (digest[i] > target[i]) return false;
+    }
+    return true; // equal
+}
+
+/// Decode nbits compact target into 32-byte little-endian target.
+fn decodeTarget(nbits: u32, out: *[32]u8) void {
+    @memset(out, 0);
+    const exp: u8  = @as(u8, @truncate(nbits >> 24));
+    const mant: u32 = nbits & 0x00ff_ffff;
+    if (exp < 3 or exp > 32) return;
+    const byte_pos: usize = @as(usize, exp) - 3;
+    if (byte_pos + 2 < 32) out[byte_pos + 2] = @as(u8, @truncate(mant >> 16));
+    if (byte_pos + 1 < 32) out[byte_pos + 1] = @as(u8, @truncate(mant >>  8));
+    if (byte_pos     < 32) out[byte_pos    ] = @as(u8, @truncate(mant      ));
+}
+
+const WorkerCtx = struct {
+    client:      *stratum.StratumClient,
+    algo:        Algo,
+    allocator:   std.mem.Allocator,
+    nonce_start: u32,
+    nonce_step:  u32,
+    found:       std.atomic.Value(bool),
+    found_nonce: std.atomic.Value(u32),
+};
+
+fn workerFn(ctx: *WorkerCtx) void {
+    const job = ctx.client.current_job orelse return;
+
+    var target: [32]u8 = undefined;
+    decodeTarget(job.nbits, &target);
+
+    var header: [80]u8 = undefined;
+    var digest: [64]u8 = undefined;
+
+    var nonce: u32 = ctx.nonce_start;
+    while (!ctx.found.load(.acquire)) {
+        buildHeader(&header, job.version, &job.prev_hash, &job.merkle_root,
+                    job.ntime, job.nbits, nonce);
+
+        switch (ctx.algo) {
+            .skein => {
+                skein.skein512(&header, &digest);
+                if (meetsTarget(digest[0..32], &target)) {
+                    ctx.found_nonce.store(nonce, .release);
+                    ctx.found.store(true, .release);
+                    return;
+                }
+            },
+            .yescrypt => {
+                var out32: [32]u8 = undefined;
+                yescrypt.yescryptR16(&header, &out32, ctx.allocator) catch return;
+                if (meetsTarget(&out32, &target)) {
+                    ctx.found_nonce.store(nonce, .release);
+                    ctx.found.store(true, .release);
+                    return;
+                }
+            },
+        }
+
+        nonce +%= ctx.nonce_step;
+        if (nonce == ctx.nonce_start) break; // full wrap -- exhausted
+    }
+}
+
 pub fn runMiner(
     allocator: std.mem.Allocator,
     client: *stratum.StratumClient,
-    wallet: []const u8,
+    _wallet: []const u8,
     threads: usize,
+    algo: Algo,
 ) !void {
-    _ = allocator;
-    _ = wallet;
+    _ = _wallet;
+    std.debug.print("[Miner] Starting | algo={s} threads={d}\n",
+        .{ @tagName(algo), threads });
 
-    std.debug.print("[Miner] Starting production mining coordinator ({d} threads)\n", .{threads});
-    std.debug.print("[Miner] Note: Full header construction + multi-thread scanning can be added here.\n", .{});
-
-    var shares_submitted: u64 = 0;
+    var line_buf: [8192]u8 = undefined;
 
     while (true) {
-        // In a complete implementation this loop would:
-        // 1. Read lines from the Stratum connection
-        // 2. Call client.parseNotify() when a new job arrives
-        // 3. Build 80-byte headers from current_job + extra_nonce
-        // 4. Launch threads to scan nonce ranges
-        // 5. Check difficulty and call client.submitShare() on valid shares
+        // Read next Stratum line from pool
+        const line = client.readLine(&line_buf) catch |err| {
+            std.debug.print("[Miner] Read error: {}\n", .{err});
+            break;
+        } orelse break;
 
-        std.debug.print("[Miner] Scanning for shares... (submitted: {d})\n", .{shares_submitted});
+        try client.handleLine(line, allocator);
 
-        // Placeholder: simulate finding and submitting a share
-        if (client.current_job) |job| {
-            try client.submitShare(job.job_id, 0x00000000abcdef12, 0);
-            shares_submitted += 1;
+        const job = client.current_job orelse continue;
+        _ = job;
+
+        // Spawn worker threads
+        var ctxs = try allocator.alloc(WorkerCtx, threads);
+        defer allocator.free(ctxs);
+        var thread_handles = try allocator.alloc(std.Thread, threads);
+        defer allocator.free(thread_handles);
+
+        for (0..threads) |t| {
+            ctxs[t] = WorkerCtx{
+                .client      = client,
+                .algo        = algo,
+                .allocator   = allocator,
+                .nonce_start = @as(u32, @truncate(t)),
+                .nonce_step  = @as(u32, @truncate(threads)),
+                .found       = std.atomic.Value(bool).init(false),
+                .found_nonce = std.atomic.Value(u32).init(0),
+            };
+            thread_handles[t] = try std.Thread.spawn(.{}, workerFn, .{&ctxs[t]});
         }
 
-        std.time.sleep(3 * std.time.ns_per_s);
+        for (thread_handles) |h| h.join();
+
+        // Check if any worker found a share
+        for (ctxs) |*c| {
+            if (c.found.load(.acquire)) {
+                const nonce = c.found_nonce.load(.acquire);
+                const j = client.current_job.?;
+                std.debug.print("[Miner] Share found! nonce=0x{x:0>8}\n", .{nonce});
+                try client.submitShare(j.job_id, nonce, j.ntime);
+                break;
+            }
+        }
     }
 }
