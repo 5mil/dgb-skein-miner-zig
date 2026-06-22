@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 # build-wsl.sh -- build rake on WSL / Linux x86_64
-# Auto-installs Zig 0.16.0 if not present or wrong version, then re-execs.
 # Usage: bash build-wsl.sh [clean]
-
-set -e
 
 REQUIRED="0.16.0"
 ZIG_DIR="$HOME/.zig-0.16.0"
@@ -16,18 +13,26 @@ if [ "$1" = "clean" ]; then
   rm -rf .zig-cache zig-out
 fi
 
-# Install Zig 0.16 if missing or wrong version
-CURRENT=$("$ZIG_BIN" version 2>/dev/null || echo "none")
+# ---- Install Zig 0.16 if needed (no set -e during this block) ----
+CURRENT=$("$ZIG_BIN" version 2>/dev/null || true)
 if [ "$CURRENT" != "$REQUIRED" ]; then
   echo "[*] Installing Zig $REQUIRED to $ZIG_DIR ..."
+  rm -rf "$ZIG_DIR"
   mkdir -p "$ZIG_DIR"
   TMP=$(mktemp -d)
-  wget -q --show-progress -O "$TMP/zig.tar.xz" "$ZIG_URL"
-  tar xf "$TMP/zig.tar.xz" -C "$TMP"
-  cp -r "$TMP"/zig-linux-x86_64-0.16.0/. "$ZIG_DIR/"
+  echo "[*] Downloading..."
+  wget -q --show-progress -O "$TMP/zig.tar.xz" "$ZIG_URL" || { echo "[-] Download failed"; exit 1; }
+  echo "[*] Extracting..."
+  tar xf "$TMP/zig.tar.xz" -C "$TMP" || { echo "[-] Extract failed"; exit 1; }
+  EXTRACTED=$(find "$TMP" -maxdepth 1 -name 'zig-linux-*' -type d | head -1)
+  if [ -z "$EXTRACTED" ]; then echo "[-] Could not find extracted dir"; exit 1; fi
+  mv "$EXTRACTED"/* "$ZIG_DIR/"
   rm -rf "$TMP"
-  echo "[+] Zig $REQUIRED installed. Continuing build..."
+  echo "[+] Zig $REQUIRED ready at $ZIG_BIN"
 fi
+
+# ---- From here, fail on any error ----
+set -e
 
 export PATH="$ZIG_DIR:$PATH"
 echo "[*] Zig version: $(zig version)"
@@ -53,7 +58,7 @@ if [ -f "$BIN" ]; then
   echo "[*] Size: $(du -h $BIN | cut -f1)"
   echo
   echo "[*] Running self-tests..."
-  $BIN
+  "$BIN"
 else
   echo "[-] Build failed: binary not found"
   exit 1
