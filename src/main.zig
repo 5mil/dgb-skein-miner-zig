@@ -35,14 +35,12 @@ fn stripStratumPrefix(s: []const u8) []const u8 {
     return s;
 }
 
-// Zig 0.16: plain `pub fn main() !void`; use GPA + argsAlloc.
-pub fn main() !void {
-    var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa_state.deinit();
-    const gpa = gpa_state.allocator();
-
-    const argv = try std.process.argsAlloc(gpa);
-    defer std.process.argsFree(gpa, argv);
+// Zig 0.16 "Juicy Main": std.process.Init injects a pre-configured allocator
+// and argv. std.heap.GeneralPurposeAllocator was renamed to DebugAllocator;
+// init.gpa already wraps DebugAllocator so we don't need to construct one manually.
+pub fn main(init: std.process.Init) !void {
+    const gpa  = init.gpa;
+    const argv = init.args;   // [][:0]u8 -- already allocated, no free needed
 
     if (argv.len < 2) {
         printUsage();
@@ -68,7 +66,7 @@ pub fn main() !void {
     if (!std.mem.eql(u8, argv[1], "--mine")) { printUsage(); std.process.exit(1); }
     if (argv.len < 3) { printUsage(); std.process.exit(1); }
 
-    const wallet     = argv[2];
+    const wallet          = argv[2];
     var host: []const u8  = DEFAULT_HOST;
     var port: u16         = DEFAULT_PORT;
     var algo: miner.Algo  = .skein;
