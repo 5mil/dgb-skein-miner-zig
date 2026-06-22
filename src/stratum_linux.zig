@@ -25,10 +25,13 @@ pub const StratumClient = struct {
     username:          []u8,
 
     pub fn connect(allocator: std.mem.Allocator, host: []const u8, port: u16) !StratumClient {
+        // Format port as a null-terminated C string for getaddrinfo.
+        // bufPrint into stack buf, then dupeZ to get the sentinel slice.
         var port_buf: [6]u8 = undefined;
-        // bufPrintZ renamed to bufPrintSentinel in Zig 0.16
-        const port_str = try std.fmt.bufPrintSentinel(&port_buf, 0, "{d}", .{port});
-        const host_z   = try allocator.dupeZ(u8, host);
+        const port_slice = try std.fmt.bufPrint(&port_buf, "{d}", .{port});
+        const port_z = try allocator.dupeZ(u8, port_slice);
+        defer allocator.free(port_z);
+        const host_z = try allocator.dupeZ(u8, host);
         defer allocator.free(host_z);
 
         // std.c.addrinfo / getaddrinfo / freeaddrinfo -- available when linking musl.
@@ -43,7 +46,7 @@ pub const StratumClient = struct {
             .next      = null,
         };
         var res: ?*c.addrinfo = null;
-        if (c.getaddrinfo(host_z.ptr, port_str.ptr, &hints, &res) != 0)
+        if (c.getaddrinfo(host_z.ptr, port_z.ptr, &hints, &res) != 0)
             return error.HostNotFound;
         defer c.freeaddrinfo(res);
 
