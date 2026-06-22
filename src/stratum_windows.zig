@@ -1,5 +1,11 @@
 //! Windows Stratum client -- Winsock2 via std.os.windows
 //! Replaces stratum.zig on windows builds.
+//!
+//! NOTE (Zig 0.16): std has completed migration away from ws2_32.dll
+//! (see 0.16 release notes: "Windows Networking Without ws2_32.dll").
+//! The ws2_32 bindings below may need to be replaced with NtDll-based
+//! equivalents or std.net once the Windows target is actively maintained.
+//! For now the Linux (musl) build is the primary target.
 const std     = @import("std");
 const windows = std.os.windows;
 const ws2     = std.os.windows.ws2_32;
@@ -30,7 +36,8 @@ pub const StratumClient = struct {
         if (ws2.WSAStartup(0x0202, &wsa) != 0) return error.WinsockInitFailed;
 
         var port_buf: [6]u8 = undefined;
-        const port_str = try std.fmt.bufPrintZ(&port_buf, "{d}", .{port});
+        // bufPrintZ renamed to bufPrintSentinel in Zig 0.16
+        const port_str = try std.fmt.bufPrintSentinel(&port_buf, 0, "{d}", .{port});
         const host_z   = try allocator.dupeZ(u8, host);
         defer allocator.free(host_z);
 

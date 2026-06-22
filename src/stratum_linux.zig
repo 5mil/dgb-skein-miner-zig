@@ -26,7 +26,8 @@ pub const StratumClient = struct {
 
     pub fn connect(allocator: std.mem.Allocator, host: []const u8, port: u16) !StratumClient {
         var port_buf: [6]u8 = undefined;
-        const port_str = try std.fmt.bufPrintZ(&port_buf, "{d}", .{port});
+        // bufPrintZ renamed to bufPrintSentinel in Zig 0.16
+        const port_str = try std.fmt.bufPrintSentinel(&port_buf, 0, "{d}", .{port});
         const host_z   = try allocator.dupeZ(u8, host);
         defer allocator.free(host_z);
 
