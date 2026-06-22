@@ -21,7 +21,6 @@ fn rotl64(v: u64, n: u32) u64 {
 fn threefish512(key: [9]u64, tw: [3]u64, pt: [8]u64, ct: *[8]u64) void {
     var v: [8]u64 = pt;
 
-    // Subkey injection s=0
     v[0] +%= key[0]; v[1] +%= key[1]; v[2] +%= key[2]; v[3] +%= key[3];
     v[4] +%= key[4];
     v[5] +%= key[5] + tw[0];
@@ -36,7 +35,6 @@ fn threefish512(key: [9]u64, tw: [3]u64, pt: [8]u64, ct: *[8]u64) void {
         v[4] +%= v[5]; v[5] = rotl64(v[5], rc[2]) ^ v[4];
         v[6] +%= v[7]; v[7] = rotl64(v[7], rc[3]) ^ v[6];
 
-        // Permute
         var t: [8]u64 = undefined;
         for (0..8) |i| {
             t[i] = v[PI8[i]];
@@ -70,17 +68,6 @@ fn load64le(p: []const u8) u64 {
            (@as(u64, p[7]) << 56);
 }
 
-fn store64le(p: []u8, v: u64) void {
-    p[0] = @as(u8, @truncate(v));
-    p[1] = @as(u8, @truncate(v >> 8));
-    p[2] = @as(u8, @truncate(v >> 16));
-    p[3] = @as(u8, @truncate(v >> 24));
-    p[4] = @as(u8, @truncate(v >> 32));
-    p[5] = @as(u8, @truncate(v >> 40));
-    p[6] = @as(u8, @truncate(v >> 48));
-    p[7] = @as(u8, @truncate(v >> 56));
-}
-
 pub const Skein512Ctxt = struct {
     X: [8]u64,
     T: [3]u64,
@@ -107,11 +94,11 @@ pub fn skein512Init(ctx: *Skein512Ctxt, hashBitLen: usize) !void {
     }
 
     ctx.T[0] = 0;
-    ctx.T[1] = (4 << 56) | (1 << 62) | (1 << 63); // CFG + FIRST + FINAL
+    ctx.T[1] = (4 << 56) | (1 << 62) | (1 << 63);
     ubiBlock(ctx, &cfg, 32);
 
     ctx.T[0] = 0;
-    ctx.T[1] = (48 << 56) | (1 << 62); // MSG + FIRST
+    ctx.T[1] = (48 << 56) | (1 << 62);
 }
 
 fn ubiBlock(ctx: *Skein512Ctxt, blk: []const u8, bytesThisBlock: usize) void {
@@ -136,7 +123,7 @@ fn ubiBlock(ctx: *Skein512Ctxt, blk: []const u8, bytesThisBlock: usize) void {
     for (0..8) |i| {
         ctx.X[i] = ct[i] ^ pt[i];
     }
-    ctx.T[1] &= ~(@as(u64, 1) << 62); // clear FIRST
+    ctx.T[1] &= ~(@as(u64, 1) << 62);
 }
 
 pub fn skein512Update(ctx: *Skein512Ctxt, msg: []const u8) void {
@@ -166,17 +153,16 @@ pub fn skein512Update(ctx: *Skein512Ctxt, msg: []const u8) void {
 }
 
 pub fn skein512Final(ctx: *Skein512Ctxt, hashVal: []u8) void {
-    ctx.T[1] |= (1 << 63); // FINAL
+    ctx.T[1] |= (1 << 63);
 
     if (ctx.bCnt < SKEIN_512_BLOCK_BYTES) {
         @memset(ctx.b[ctx.bCnt..], 0);
     }
     ubiBlock(ctx, &ctx.b, ctx.bCnt);
 
-    // Output block
     var outBlk: [SKEIN_512_BLOCK_BYTES]u8 = .{0} ** SKEIN_512_BLOCK_BYTES;
     ctx.T[0] = 0;
-    ctx.T[1] = (63 << 56) | (1 << 62) | (1 << 63); // OUT + FIRST + FINAL
+    ctx.T[1] = (63 << 56) | (1 << 62) | (1 << 63);
     ubiBlock(ctx, &outBlk, 8);
 
     const byteCnt = (ctx.hashBitLen + 7) / 8;
@@ -193,18 +179,29 @@ pub fn skein512(in: []const u8, out: []u8) void {
     skein512Final(&ctx, out[0..64]);
 }
 
-// For mining: exactly 80-byte input -> 64-byte output
 pub fn skein512Mining(in: [80]u8, out: *[64]u8) void {
     skein512(&in, out);
 }
 
-// KAT verification - simple zero input test
-pub fn runKAT() void {
-    const zero_header: [80]u8 = .{0} ** 80;
-    var out: [64]u8 = undefined;
-    skein512(&zero_header, &out);
+pub fn runKAT() bool {
+    std.debug.print("Running Skein-512 KATs...\n", .{});
 
-    std.debug.print("Scalar Skein-512 KAT test (zero header):\n", .{});
-    std.debug.print("Output: {s}\n", .{std.fmt.fmtSliceHexLower(&out)});
-    std.debug.print("KAT verification structure ready.\n", .{});
+    const zero: [80]u8 = .{0} ** 80;
+    var out1: [64]u8 = undefined;
+    skein512(&zero, &out1);
+
+    const expected_zero = "7ac2e3594be8144f8497d26e0b531fbaac0989b5fa053640cc77970e572e5438d8dcfdcabd62720831e5758863c195a87f4a197d2170b4ec81ba6d6545231f98";
+
+    var hex_buf: [128]u8 = undefined;
+    const hex = std.fmt.bufPrint(&hex_buf, "{s}", .{std.fmt.fmtSliceHexLower(&out1)}) catch "";
+
+    if (std.mem.eql(u8, hex, expected_zero)) {
+        std.debug.print("  [PASS] Zero 80-byte header\n", .{});
+    } else {
+        std.debug.print("  [FAIL] Zero header\n", .{});
+        return false;
+    }
+
+    std.debug.print("All KATs passed.\n", .{});
+    return true;
 }
