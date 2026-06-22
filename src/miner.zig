@@ -1,10 +1,16 @@
-//! Mining loop for DGB Skein-512 and YescryptR16.
+//! Mining loop -- Skein-512 (scalar + AVX2 4-way) and YescryptR16.
 const std      = @import("std");
+const builtin  = @import("builtin");
 const skein    = @import("skein.zig");
+const avx2     = @import("skein_avx2.zig");
 const yescrypt = @import("yescrypt.zig");
 const stratum  = @import("stratum.zig");
+const cpu      = @import("cpu.zig");
 
 pub const Algo = enum { skein, yescrypt };
+
+/// Global stop flag -- set by SIGINT handler or main on disconnect.
+pub var g_stop = std.atomic.Value(bool).init(false);
 
 fn buildHeader(
     out: *[80]u8,
@@ -21,8 +27,7 @@ fn buildHeader(
 
 fn meetsTarget(digest: *const [32]u8, target: *const [32]u8) bool {
     var i: usize = 32;
-    while (i > 0) {
-        i -= 1;
+    while (i > 0) { i -= 1;
         if (digest[i] < target[i]) return true;
         if (digest[i] > target[i]) return false;
     }
@@ -46,87 +51,189 @@ const WorkerCtx = struct {
     allocator:   std.mem.Allocator,
     nonce_start: u32,
     nonce_step:  u32,
+    en2:         u32,    // extra_nonce2 assigned to this worker
     found:       std.atomic.Value(bool),
     found_nonce: std.atomic.Value(u32),
+    use_avx2:    bool,
 };
 
 fn workerFn(ctx: *WorkerCtx) void {
-    const job = ctx.client.current_job orelse return;
+    // Take a snapshot of the current job (RwLock-protected)
+    var job = ctx.client.lockJob() orelse return;
+    defer job.free(ctx.allocator);
+
     var target: [32]u8 = undefined;
     decodeTarget(job.nbits, &target);
-    var header: [80]u8 = undefined;
-    var digest: [64]u8 = undefined;
+
+    // Pre-allocate yescrypt scratch (once per thread, ~4 MB)
+    var scratch: ?yescrypt.ScratchBuf = if (ctx.algo == .yescrypt)
+        yescrypt.ScratchBuf.init(ctx.allocator) catch return
+    else null;
+    defer if (scratch) |*s| s.deinit();
+
     var nonce: u32 = ctx.nonce_start;
-    while (!ctx.found.load(.acquire)) {
-        buildHeader(&header, job.version, &job.prev_hash, &job.merkle_root,
-                    job.ntime, job.nbits, nonce);
-        switch (ctx.algo) {
-            .skein => {
-                skein.skein512(&header, &digest);
-                if (meetsTarget(digest[0..32], &target)) {
-                    ctx.found_nonce.store(nonce, .release);
+
+    if (ctx.use_avx2 and ctx.algo == .skein) {
+        // 4-way AVX2 path: process 4 nonces per iteration
+        while (!ctx.found.load(.acquire) and !g_stop.load(.acquire)) {
+            var h0: [80]u8 = undefined; var h1: [80]u8 = undefined;
+            var h2: [80]u8 = undefined; var h3: [80]u8 = undefined;
+            var o0: [64]u8 = undefined; var o1: [64]u8 = undefined;
+            var o2: [64]u8 = undefined; var o3: [64]u8 = undefined;
+            buildHeader(&h0, job.version, &job.prev_hash, &job.merkle_root, job.ntime, job.nbits, nonce);
+            buildHeader(&h1, job.version, &job.prev_hash, &job.merkle_root, job.ntime, job.nbits, nonce +% ctx.nonce_step);
+            buildHeader(&h2, job.version, &job.prev_hash, &job.merkle_root, job.ntime, job.nbits, nonce +% ctx.nonce_step *% 2);
+            buildHeader(&h3, job.version, &job.prev_hash, &job.merkle_root, job.ntime, job.nbits, nonce +% ctx.nonce_step *% 3);
+            avx2.skein512Avx2_4way(&h0, &h1, &h2, &h3, &o0, &o1, &o2, &o3);
+            inline for (.{ .{ o0, nonce }, .{ o1, nonce +% ctx.nonce_step },
+                            .{ o2, nonce +% ctx.nonce_step *% 2 },
+                            .{ o3, nonce +% ctx.nonce_step *% 3 } }) |pair| {
+                if (meetsTarget(pair[0][0..32], &target)) {
+                    ctx.found_nonce.store(pair[1], .release);
                     ctx.found.store(true, .release);
                     return;
                 }
-            },
-            .yescrypt => {
-                var out32: [32]u8 = undefined;
-                yescrypt.yescryptR16(&header, &out32, ctx.allocator) catch return;
-                if (meetsTarget(&out32, &target)) {
-                    ctx.found_nonce.store(nonce, .release);
-                    ctx.found.store(true, .release);
-                    return;
-                }
-            },
+            }
+            nonce +%= ctx.nonce_step *% 4;
+            if (nonce == ctx.nonce_start) break;
         }
-        nonce +%= ctx.nonce_step;
-        if (nonce == ctx.nonce_start) break;
+    } else {
+        // Scalar path (Skein or yescrypt)
+        while (!ctx.found.load(.acquire) and !g_stop.load(.acquire)) {
+            var header: [80]u8 = undefined;
+            buildHeader(&header, job.version, &job.prev_hash, &job.merkle_root,
+                        job.ntime, job.nbits, nonce);
+            switch (ctx.algo) {
+                .skein => {
+                    var digest: [64]u8 = undefined;
+                    skein.skein512(&header, &digest);
+                    if (meetsTarget(digest[0..32], &target)) {
+                        ctx.found_nonce.store(nonce, .release);
+                        ctx.found.store(true, .release);
+                        return;
+                    }
+                },
+                .yescrypt => {
+                    var out32: [32]u8 = undefined;
+                    yescrypt.yescryptR16Scratch(&header, &out32, &scratch.?);
+                    if (meetsTarget(&out32, &target)) {
+                        ctx.found_nonce.store(nonce, .release);
+                        ctx.found.store(true, .release);
+                        return;
+                    }
+                },
+            }
+            nonce +%= ctx.nonce_step;
+            if (nonce == ctx.nonce_start) break;
+        }
     }
+}
+
+// SIGINT handler -- sets g_stop so all threads exit cleanly.
+fn handleSigint(_: c_int) callconv(.C) void {
+    g_stop.store(true, .release);
 }
 
 pub fn runMiner(
     allocator: std.mem.Allocator,
-    client: *stratum.StratumClient,
-    _wallet: []const u8,
-    threads: usize,
-    algo: Algo,
+    host:      []const u8,
+    port:      u16,
+    wallet:    []const u8,
+    threads:   usize,
+    algo:      Algo,
 ) !void {
-    _ = _wallet;
-    std.debug.print("[Miner] Starting | algo={s} threads={d}\n", .{ @tagName(algo), threads });
-    var line_buf: [8192]u8 = undefined;
-    while (true) {
-        const line = client.readLine(&line_buf) catch |err| {
-            std.debug.print("[Miner] Read error: {}\n", .{err});
-            break;
-        } orelse break;
-        try client.handleLine(line, allocator);
-        const job = client.current_job orelse continue;
-        _ = job;
-        var ctxs = try allocator.alloc(WorkerCtx, threads);
-        defer allocator.free(ctxs);
-        var handles = try allocator.alloc(std.Thread, threads);
-        defer allocator.free(handles);
-        for (0..threads) |t| {
-            ctxs[t] = .{
-                .client      = client,
-                .algo        = algo,
-                .allocator   = allocator,
-                .nonce_start = @truncate(t),
-                .nonce_step  = @truncate(threads),
-                .found       = std.atomic.Value(bool).init(false),
-                .found_nonce = std.atomic.Value(u32).init(0),
-            };
-            handles[t] = try std.Thread.spawn(.{}, workerFn, .{&ctxs[t]});
-        }
-        for (handles) |h| h.join();
-        for (ctxs) |*c| {
-            if (c.found.load(.acquire)) {
-                const nonce = c.found_nonce.load(.acquire);
-                const j = client.current_job.?;
-                std.debug.print("[Miner] Share found! nonce=0x{x:0>8}\n", .{nonce});
-                try client.submitShare(j.job_id, nonce, j.ntime);
-                break;
+    // Install SIGINT handler (Linux; Windows uses SetConsoleCtrlHandler but
+    // the Windows build path goes through stratum_windows.zig anyway).
+    const builtin_os = builtin.os.tag;
+    if (builtin_os == .linux or builtin_os == .macos) {
+        const sa = std.posix.Sigaction{
+            .handler = .{ .handler = handleSigint },
+            .mask    = std.posix.empty_sigset,
+            .flags   = 0,
+        };
+        try std.posix.sigaction(std.posix.SIG.INT, &sa, null);
+    }
+
+    const use_avx2 = (algo == .skein) and cpu.hasAvx2();
+    if (use_avx2)
+        std.debug.print("[Miner] AVX2 4-way Skein enabled\n", .{})
+    else
+        std.debug.print("[Miner] Scalar path | algo={s}\n", .{@tagName(algo)});
+
+    // Reconnection loop
+    var reconnect_delay: u64 = 2;
+    while (!g_stop.load(.acquire)) {
+        std.debug.print("[Miner] Connecting {s}:{d}...\n", .{ host, port });
+        var client = stratum.StratumClient.connect(allocator, host, port) catch |err| {
+            std.debug.print("[Miner] Connect failed: {} -- retry in {d}s\n", .{ err, reconnect_delay });
+            std.time.sleep(reconnect_delay * std.time.ns_per_s);
+            reconnect_delay = @min(reconnect_delay * 2, 60);
+            continue;
+        };
+        defer client.deinit();
+        reconnect_delay = 2;
+
+        client.subscribe() catch |err| {
+            std.debug.print("[Miner] Subscribe failed: {}\n", .{err});
+            continue;
+        };
+        client.authorize(wallet, "x") catch |err| {
+            std.debug.print("[Miner] Authorize failed: {}\n", .{err});
+            continue;
+        };
+
+        std.debug.print("[Miner] Mining | threads={d}\n", .{threads});
+        var line_buf: [8192]u8 = undefined;
+
+        mineLoop: while (!g_stop.load(.acquire)) {
+            const line = client.readLine(&line_buf) catch |err| {
+                std.debug.print("[Miner] Read error: {}\n", .{err});
+                break :mineLoop;
+            } orelse break :mineLoop;
+
+            client.handleLine(line) catch {};
+
+            const job = client.lockJob() orelse continue;
+
+            // Assign each thread a unique extra_nonce2 (simple counter)
+            var ctxs    = allocator.alloc(WorkerCtx, threads) catch break :mineLoop;
+            defer allocator.free(ctxs);
+            var handles = allocator.alloc(std.Thread, threads) catch break :mineLoop;
+            defer allocator.free(handles);
+
+            for (0..threads) |t| {
+                ctxs[t] = WorkerCtx{
+                    .client      = &client,
+                    .algo        = algo,
+                    .allocator   = allocator,
+                    .nonce_start = @truncate(t),
+                    .nonce_step  = @truncate(threads),
+                    .en2         = @truncate(t),
+                    .found       = std.atomic.Value(bool).init(false),
+                    .found_nonce = std.atomic.Value(u32).init(0),
+                    .use_avx2    = use_avx2,
+                };
+                // Worker takes its own snapshot via lockJob() internally
+            }
+            // Free the snapshot taken above -- workers make their own
+            var j = job; j.free(allocator);
+
+            for (0..threads) |t|
+                handles[t] = std.Thread.spawn(.{}, workerFn, .{&ctxs[t]}) catch break :mineLoop;
+            for (handles) |h| h.join();
+
+            for (ctxs) |*ctx| {
+                if (ctx.found.load(.acquire)) {
+                    const nonce = ctx.found_nonce.load(.acquire);
+                    const found_job = client.lockJob() orelse break;
+                    defer { var fj = found_job; fj.free(allocator); }
+                    std.debug.print("[Miner] Share! nonce=0x{x:0>8}\n", .{nonce});
+                    client.submitShare(found_job.job_id, nonce, found_job.ntime, ctx.en2) catch {};
+                    break;
+                }
             }
         }
+        std.debug.print("[Miner] Disconnected -- reconnecting...\n", .{});
     }
+    std.debug.print("[Miner] Stopped.\n", .{});
 }

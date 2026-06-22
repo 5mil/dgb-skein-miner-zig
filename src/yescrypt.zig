@@ -1,6 +1,7 @@
 //! yescryptR16 for DigiByte.
 //! Parameters: N=2048, r=16, p=1, flags=YESCRYPT_RW
 //! Input/output: 80-byte header -> 32-byte digest.
+//! Per-thread scratch buffer (ScratchBuf) amortises the 4 MB V allocation.
 
 const std = @import("std");
 
@@ -21,30 +22,19 @@ fn hmacSha256(key: []const u8, data: []const u8, out: *[32]u8) void {
     var ipad: [64]u8 = undefined;
     var opad: [64]u8 = undefined;
     for (0..64) |i| { ipad[i] = k[i] ^ 0x36; opad[i] = k[i] ^ 0x5c; }
-
     var h1 = std.crypto.hash.sha2.Sha256.init(.{});
-    h1.update(&ipad);
-    h1.update(data);
-    var tmp: [32]u8 = undefined;
-    h1.final(&tmp);
-
+    h1.update(&ipad); h1.update(data);
+    var tmp: [32]u8 = undefined; h1.final(&tmp);
     var h2 = std.crypto.hash.sha2.Sha256.init(.{});
-    h2.update(&opad);
-    h2.update(&tmp);
-    h2.final(out);
+    h2.update(&opad); h2.update(&tmp); h2.final(out);
 }
 
-fn pbkdf2Sha256(
-    password: []const u8,
-    salt: []const u8,
-    dk: []u8,
-) void {
+fn pbkdf2Sha256(password: []const u8, salt: []const u8, dk: []u8) void {
     const blocks = (dk.len + 31) / 32;
     var written: usize = 0;
     var s_ext: [80 + 4]u8 = undefined;
     const slen = @min(salt.len, 80);
     @memcpy(s_ext[0..slen], salt[0..slen]);
-
     var block: u32 = 1;
     while (block <= blocks) : (block += 1) {
         s_ext[slen + 0] = @as(u8, @truncate(block >> 24));
@@ -86,9 +76,37 @@ fn salsa20_8(B: *[16]u32) void {
     for (0..16) |i| B[i] +%= x[i];
 }
 
-const R: u32 = 16;
-const BLOCK_WORDS: u32 = 2 * R * 16;
-const BLOCK_BYTES: u32 = BLOCK_WORDS * 4;
+pub const R: u32 = 16;
+pub const BLOCK_WORDS: u32 = 2 * R * 16;
+pub const BLOCK_BYTES: u32 = BLOCK_WORDS * 4;
+pub const N: u64 = 2048;
+
+/// Reusable per-thread scratch buffer -- allocate once, reuse every hash call.
+/// Eliminates the ~4 MB malloc/free in the hot path.
+pub const ScratchBuf = struct {
+    X: []u32,   // [BLOCK_WORDS]
+    Y: []u32,   // [BLOCK_WORDS]
+    V: []u32,   // [N * BLOCK_WORDS]  ~4 MB for yescryptR16
+    B: []u8,    // [BLOCK_BYTES]
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator) !ScratchBuf {
+        return ScratchBuf{
+            .X = try allocator.alloc(u32, BLOCK_WORDS),
+            .Y = try allocator.alloc(u32, BLOCK_WORDS),
+            .V = try allocator.alloc(u32, N * BLOCK_WORDS),
+            .B = try allocator.alloc(u8,  BLOCK_BYTES),
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *ScratchBuf) void {
+        self.allocator.free(self.X);
+        self.allocator.free(self.Y);
+        self.allocator.free(self.V);
+        self.allocator.free(self.B);
+    }
+};
 
 fn blockMix(B: []u32, Y: []u32) void {
     var X: [16]u32 = undefined;
@@ -102,48 +120,37 @@ fn blockMix(B: []u32, Y: []u32) void {
     for (0..R) |i| @memcpy(B[(R+i)*16 .. (R+i)*16+16], Y[(2*i+1)*16 .. (2*i+1)*16+16]);
 }
 
-const N: u64 = 2048;
-
-fn smix(B: []u8, allocator: std.mem.Allocator) !void {
+fn smixScratch(B: []u8, s: *ScratchBuf) void {
     const bw = BLOCK_WORDS;
-    const X = try allocator.alloc(u32, bw);
-    defer allocator.free(X);
-    const Y = try allocator.alloc(u32, bw);
-    defer allocator.free(Y);
-    const V = try allocator.alloc(u32, N * bw);
-    defer allocator.free(V);
-
-    for (0..bw) |i| {
-        X[i] = std.mem.readInt(u32, B[i*4..][0..4], .little);
-    }
-
+    for (0..bw) |i|
+        s.X[i] = std.mem.readInt(u32, B[i*4..][0..4], .little);
     for (0..N) |i| {
-        @memcpy(V[i*bw .. i*bw+bw], X);
-        blockMix(X, Y);
+        @memcpy(s.V[i*bw .. i*bw+bw], s.X);
+        blockMix(s.X, s.Y);
     }
-
     for (0..N) |_| {
-        const j: u64 = @as(u64, X[bw - BLOCK_WORDS % bw + (bw - 16)]) & (N - 1);
-        for (0..bw) |k| X[k] ^= V[j*bw + k];
-        blockMix(X, Y);
-        @memcpy(V[j*bw .. j*bw+bw], X);
+        const j: u64 = @as(u64, s.X[bw - 16]) & (N - 1);
+        for (0..bw) |k| s.X[k] ^= s.V[j*bw + k];
+        blockMix(s.X, s.Y);
+        @memcpy(s.V[j*bw .. j*bw+bw], s.X);
     }
-
-    for (0..bw) |i| {
-        std.mem.writeInt(u32, B[i*4..][0..4], X[i], .little);
-    }
+    for (0..bw) |i|
+        std.mem.writeInt(u32, B[i*4..][0..4], s.X[i], .little);
 }
 
+/// Hash one 80-byte header using pre-allocated scratch buffers.
+pub fn yescryptR16Scratch(header: *const [80]u8, out: *[32]u8, s: *ScratchBuf) void {
+    pbkdf2Sha256(header, header, s.B);
+    smixScratch(s.B, s);
+    pbkdf2Sha256(header, s.B, out);
+}
+
+/// One-shot version that allocates/frees scratch on each call.
+/// Used only for self-test; workers use yescryptR16Scratch.
 pub fn yescryptR16(header: *const [80]u8, out: *[32]u8, allocator: std.mem.Allocator) !void {
-    const p: u32 = 1;
-    const blen: usize = @as(usize, p) * @as(usize, BLOCK_BYTES);
-
-    const B = try allocator.alloc(u8, blen);
-    defer allocator.free(B);
-
-    pbkdf2Sha256(header, header, B);
-    try smix(B, allocator);
-    pbkdf2Sha256(header, B, out);
+    var s = try ScratchBuf.init(allocator);
+    defer s.deinit();
+    yescryptR16Scratch(header, out, &s);
 }
 
 pub fn selftest(allocator: std.mem.Allocator) !bool {
@@ -157,13 +164,8 @@ pub fn selftest(allocator: std.mem.Allocator) !bool {
     var got: [32]u8 = undefined;
     try yescryptR16(&zero, &got, allocator);
     const ok = std.mem.eql(u8, &got, &expected);
-    if (!ok) {
-        std.debug.print("[yescrypt] FAIL\n  exp: {s}\n  got: {s}\n", .{
-            std.fmt.bytesToHex(&expected, .lower),
-            std.fmt.bytesToHex(&got,      .lower),
-        });
-    } else {
-        std.debug.print("[yescrypt] PASS\n", .{});
-    }
+    if (!ok) std.debug.print("[yescrypt] FAIL\n  exp: {s}\n  got: {s}\n", .{
+        std.fmt.bytesToHex(&expected, .lower), std.fmt.bytesToHex(&got, .lower) })
+    else     std.debug.print("[yescrypt] PASS\n", .{});
     return ok;
 }

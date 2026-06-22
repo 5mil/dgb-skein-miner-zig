@@ -25,6 +25,7 @@ fn printUsage() void {
         \\
         \\Example:
         \\  rake --mine 5mil.worker55 --algo skein --threads 4
+        \\  rake --mine 5mil.worker55 --algo skein --threads 8 --host pool.example.com --port 3333
         \\
     , .{});
 }
@@ -35,23 +36,21 @@ fn stripStratumPrefix(s: []const u8) []const u8 {
     return s;
 }
 
-// Zig 0.16 "Juicy Main":
-//   init.gpa              -- std.mem.Allocator (backed by DebugAllocator in debug builds)
-//   init.arena            -- *std.heap.ArenaAllocator (lives for the whole process)
-//   init.minimal.args     -- raw argv iterator; .toSlice(arena) converts to [][:0]const u8
 pub fn main(init: std.process.Init) !void {
     const gpa  = init.gpa;
     const argv = try init.minimal.args.toSlice(init.arena.allocator());
 
-    if (argv.len < 2) {
+    if (argv.len < 2 or std.mem.eql(u8, argv[1], "--help") or std.mem.eql(u8, argv[1], "-h")) {
         printUsage();
-        std.debug.print("=== Self-tests ===\n", .{});
-        const sk_ok = skein.runKAT();
-        const ye_ok = yescrypt.selftest(gpa) catch false;
-        std.debug.print("\n=== Available ===\n", .{});
-        if (sk_ok) std.debug.print("  skein    [READY]\n", .{});
-        if (ye_ok) std.debug.print("  yescrypt [READY]\n", .{});
-        if (!sk_ok and !ye_ok) std.process.exit(1);
+        if (argv.len < 2) {
+            std.debug.print("=== Self-tests ===\n", .{});
+            const sk_ok = skein.runKAT();
+            const ye_ok = yescrypt.selftest(gpa) catch false;
+            std.debug.print("\n=== Available ===\n", .{});
+            if (sk_ok) std.debug.print("  skein    [READY]\n", .{});
+            if (ye_ok) std.debug.print("  yescrypt [READY]\n", .{});
+            if (!sk_ok and !ye_ok) std.process.exit(1);
+        }
         return;
     }
 
@@ -104,17 +103,12 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (algo == .skein) {
-        if (cpu.hasAvx2()) std.debug.print("[CPU] AVX2 active\n", .{})
+        if (cpu.hasAvx2()) std.debug.print("[CPU] AVX2 4-way active\n", .{})
         else               std.debug.print("[CPU] Scalar path\n", .{});
     }
 
     std.debug.print("=== Connecting {s}:{d} | wallet={s} | threads={d} ===\n",
         .{ host, port, wallet, threads });
 
-    var client = try stratum.StratumClient.connect(gpa, host, port);
-    defer client.deinit();
-
-    try client.subscribe();
-    try client.authorize(wallet, "x");
-    try miner.runMiner(gpa, &client, wallet, threads, algo);
+    try miner.runMiner(gpa, host, port, wallet, threads, algo);
 }
