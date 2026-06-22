@@ -24,7 +24,7 @@ const T_FINAL: u64 = @as(u64, 1) << 63;
 
 fn rotl64(x: u64, n: u8) u64 {
     const s: u6 = @intCast(n % 64);
-    const r: u6 = @intCast((64 - @as(u7, n)) % 64);
+    const r: u6 = @intCast((64 - @as(u32, n)) % 64);
     return (x << s) | (x >> r);
 }
 
@@ -68,27 +68,21 @@ pub const Skein512Ctx = struct {
 };
 
 fn processBlock(ctx: *Skein512Ctx, blk: *const [64]u8, byteCntAdd: usize) void {
-    // Build Threefish key from chaining state + parity word
     var key: [9]u64 = undefined;
     key[8] = KS_PARITY;
     for (0..8) |i| { key[i] = ctx.X[i]; key[8] ^= ctx.X[i]; }
 
-    // Accumulate byte count; compute T[2] = T[0] ^ T[1]
     ctx.T[0] +%= @as(u64, byteCntAdd);
     ctx.T[2]  = ctx.T[0] ^ ctx.T[1];
 
-    // Load block words little-endian -- save as plaintext for feedforward
     var pt: [8]u64 = undefined;
     for (0..8) |i| pt[i] = std.mem.readInt(u64, blk[i*8..][0..8], .little);
 
-    // Encrypt (modifies pt in place -> ciphertext)
     var ct = pt;
     tf512(key, ctx.T, &ct);
 
-    // UBI feedforward: new_state = ciphertext XOR plaintext
     for (0..8) |i| ctx.X[i] = ct[i] ^ pt[i];
 
-    // Clear FIRST flag after first block in chain
     ctx.T[1] &= ~T_FIRST;
 }
 
@@ -98,17 +92,15 @@ pub fn skein512Init(ctx: *Skein512Ctx, hashBitLen: usize) !void {
     ctx.bCnt = 0;
     @memset(&ctx.X, 0);
 
-    // 32-byte config block, zero-padded to 64
     var cfg: [64]u8 = [_]u8{0} ** 64;
-    cfg[0] = 0x53; cfg[1] = 0x48; cfg[2] = 0x41; cfg[3] = 0x33; // "SHA3"
-    cfg[4] = 0x01; cfg[5] = 0x00;                                 // version 1
+    cfg[0] = 0x53; cfg[1] = 0x48; cfg[2] = 0x41; cfg[3] = 0x33;
+    cfg[4] = 0x01; cfg[5] = 0x00;
     std.mem.writeInt(u64, cfg[8..16][0..8], @as(u64, hashBitLen), .little);
 
     ctx.T[0] = 0;
     ctx.T[1] = T_FIRST | T_FINAL | T_CFG;
     processBlock(ctx, &cfg, 32);
 
-    // Reset for message
     ctx.T[0] = 0;
     ctx.T[1] = T_FIRST | T_MSG;
     ctx.bCnt = 0;
@@ -134,18 +126,15 @@ pub fn skein512Update(ctx: *Skein512Ctx, msg: []const u8) void {
 }
 
 pub fn skein512Final(ctx: *Skein512Ctx, out: []u8) void {
-    // Zero-pad remainder, set FINAL, process last message block
     if (ctx.bCnt < 64) @memset(ctx.b[ctx.bCnt..], 0);
     ctx.T[1] |= T_FINAL;
     processBlock(ctx, &ctx.b, ctx.bCnt);
 
-    // Output transform: one block with counter=0 (8-byte LE zero)
     const outBlk = [_]u8{0} ** 64;
     ctx.T[0] = 0;
     ctx.T[1] = T_FIRST | T_FINAL | T_OUT;
     processBlock(ctx, &outBlk, 8);
 
-    // Write output little-endian
     const byteCnt = (ctx.hashBitLen + 7) / 8;
     var i: usize = 0;
     while (i < byteCnt) : (i += 8) {
@@ -167,7 +156,6 @@ pub fn skein512Mining(in: [80]u8, out: *[64]u8) void {
     skein512(&in, out);
 }
 
-// KAT vectors: Skein 1.3 spec Appendix B
 const kat_empty_exp = [64]u8{
     0xbc,0x5b,0x4c,0x50,0x92,0x55,0x19,0xc2, 0x90,0xcc,0x63,0x42,0x77,0xae,0x3d,0x62,
     0x57,0x21,0x23,0x95,0xcb,0xa7,0x33,0xbb, 0xad,0x37,0xa4,0xaf,0x0f,0xa0,0x6a,0xf4,
@@ -217,8 +205,12 @@ pub fn runKAT() bool {
     for (cases) |c| {
         skein512(c.in, &out);
         if (!std.mem.eql(u8, &out, c.exp)) {
+            var exp_hex: [128]u8 = undefined;
+            var got_hex: [128]u8 = undefined;
             std.debug.print("  [FAIL] {s}\n    exp: {s}\n    got: {s}\n", .{
-                c.label, std.fmt.fmtSliceHexLower(c.exp), std.fmt.fmtSliceHexLower(&out),
+                c.label,
+                std.fmt.bytesToHex(c.exp, .lower, &exp_hex),
+                std.fmt.bytesToHex(&out,  .lower, &got_hex),
             });
             ok = false;
         } else {

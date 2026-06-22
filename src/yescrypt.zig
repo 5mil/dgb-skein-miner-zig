@@ -4,10 +4,6 @@
 
 const std = @import("std");
 
-// -----------------------------------------------------------------------
-// HMAC-SHA256
-// -----------------------------------------------------------------------
-
 fn sha256(data: []const u8, out: *[32]u8) void {
     var h = std.crypto.hash.sha2.Sha256.init(.{});
     h.update(data);
@@ -38,10 +34,6 @@ fn hmacSha256(key: []const u8, data: []const u8, out: *[32]u8) void {
     h2.final(out);
 }
 
-// -----------------------------------------------------------------------
-// PBKDF2-SHA256 (c=1)
-// -----------------------------------------------------------------------
-
 fn pbkdf2Sha256(
     password: []const u8,
     salt: []const u8,
@@ -67,11 +59,6 @@ fn pbkdf2Sha256(
     }
 }
 
-// -----------------------------------------------------------------------
-// Salsa20/8
-// -----------------------------------------------------------------------
-
-// n in 1..18 for Salsa20 constants; (32-n) needs one extra bit -> use u6.
 inline fn rotl32(v: u32, n: u6) u32 {
     return (v << @as(u5, @truncate(n))) | (v >> @as(u5, @truncate(32 - n)));
 }
@@ -99,10 +86,6 @@ fn salsa20_8(B: *[16]u32) void {
     for (0..16) |i| B[i] +%= x[i];
 }
 
-// -----------------------------------------------------------------------
-// BlockMix
-// -----------------------------------------------------------------------
-
 const R: u32 = 16;
 const BLOCK_WORDS: u32 = 2 * R * 16;
 const BLOCK_BYTES: u32 = BLOCK_WORDS * 4;
@@ -118,10 +101,6 @@ fn blockMix(B: []u32, Y: []u32) void {
     for (0..R) |i| @memcpy(B[i*16 .. i*16+16],         Y[(2*i)*16   .. (2*i)*16+16]);
     for (0..R) |i| @memcpy(B[(R+i)*16 .. (R+i)*16+16], Y[(2*i+1)*16 .. (2*i+1)*16+16]);
 }
-
-// -----------------------------------------------------------------------
-// SMix
-// -----------------------------------------------------------------------
 
 const N: u64 = 2048;
 
@@ -155,10 +134,6 @@ fn smix(B: []u8, allocator: std.mem.Allocator) !void {
     }
 }
 
-// -----------------------------------------------------------------------
-// Public API
-// -----------------------------------------------------------------------
-
 pub fn yescryptR16(header: *const [80]u8, out: *[32]u8, allocator: std.mem.Allocator) !void {
     const p: u32 = 1;
     const blen: usize = @as(usize, p) * @as(usize, BLOCK_BYTES);
@@ -170,10 +145,6 @@ pub fn yescryptR16(header: *const [80]u8, out: *[32]u8, allocator: std.mem.Alloc
     try smix(B, allocator);
     pbkdf2Sha256(header, B, out);
 }
-
-// -----------------------------------------------------------------------
-// Self-test
-// -----------------------------------------------------------------------
 
 pub fn selftest(allocator: std.mem.Allocator) !bool {
     const zero: [80]u8 = [_]u8{0} ** 80;
@@ -187,9 +158,11 @@ pub fn selftest(allocator: std.mem.Allocator) !bool {
     try yescryptR16(&zero, &got, allocator);
     const ok = std.mem.eql(u8, &got, &expected);
     if (!ok) {
+        var exp_hex: [64]u8 = undefined;
+        var got_hex: [64]u8 = undefined;
         std.debug.print("[yescrypt] FAIL\n  exp: {s}\n  got: {s}\n", .{
-            std.fmt.fmtSliceHexLower(&expected),
-            std.fmt.fmtSliceHexLower(&got),
+            std.fmt.bytesToHex(&expected, .lower, &exp_hex),
+            std.fmt.bytesToHex(&got,      .lower, &got_hex),
         });
     } else {
         std.debug.print("[yescrypt] PASS\n", .{});
