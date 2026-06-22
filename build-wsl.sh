@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# build-wsl.sh -- build rake on WSL / Linux x86_64 (AMD Ryzen 9 or any x86_64)
-# Auto-installs Zig 0.16.0 if not present or wrong version.
+# build-wsl.sh -- build rake on WSL / Linux x86_64
+# Auto-installs Zig 0.16.0 if not present or wrong version, then re-execs.
 # Usage: bash build-wsl.sh [clean]
 
 set -e
@@ -26,27 +26,27 @@ if [ "$CURRENT" != "$REQUIRED" ]; then
   tar xf "$TMP/zig.tar.xz" -C "$TMP"
   cp -r "$TMP"/zig-linux-x86_64-0.16.0/. "$ZIG_DIR/"
   rm -rf "$TMP"
-  echo "[+] Zig $REQUIRED installed at $ZIG_BIN"
+  echo "[+] Zig $REQUIRED installed. Continuing build..."
 fi
 
 export PATH="$ZIG_DIR:$PATH"
-echo "[*] Zig version: $($ZIG_BIN version)"
+echo "[*] Zig version: $(zig version)"
 
-# Detect AVX2 -- Ryzen 9 always has it
+# Detect AVX2
+CPU_FLAGS=()
 if grep -q avx2 /proc/cpuinfo 2>/dev/null; then
-  CPU_FLAG="-Dcpu=x86_64_v3"
+  CPU_FLAGS+=("-Dcpu=x86_64_v3")
   echo "[*] AVX2 detected -- building with x86_64_v3"
 else
-  CPU_FLAG=""
   echo "[*] No AVX2 -- building baseline x86_64"
 fi
 
 echo "[*] Building rake (ReleaseFast, x86_64-linux-musl)..."
 
-"$ZIG_BIN" build \
+zig build \
   -Doptimize=ReleaseFast \
   -Dtarget=x86_64-linux-musl \
-  $CPU_FLAG
+  "${CPU_FLAGS[@]}"
 
 if [ -f "$BIN" ]; then
   echo "[+] Build successful: $BIN"
