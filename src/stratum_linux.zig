@@ -1,8 +1,7 @@
 //! Stratum v1 client -- Linux (x86_64-linux-musl, aarch64-linux-musl)
-//! Uses std.net.getAddressList for DNS -- no libc getaddrinfo needed.
+//! DNS via std.posix.getaddrinfo -- works with musl in Zig 0.16.
 const std   = @import("std");
 const posix = std.posix;
-const net   = std.net;
 
 pub const Job = struct {
     job_id:      []const u8,
@@ -25,17 +24,33 @@ pub const StratumClient = struct {
     username:          []u8,
 
     pub fn connect(allocator: std.mem.Allocator, host: []const u8, port: u16) !StratumClient {
-        // std.net.getAddressList does its own DNS resolution with no libc dep.
-        const list = try net.getAddressList(allocator, host, port);
-        defer list.deinit();
+        var port_buf: [6]u8 = undefined;
+        const port_str = try std.fmt.bufPrintZ(&port_buf, "{d}", .{port});
+        const host_z   = try allocator.dupeZ(u8, host);
+        defer allocator.free(host_z);
 
-        for (list.addrs) |addr| {
+        const hints = posix.addrinfo{
+            .flags     = .{},
+            .family    = posix.AF.UNSPEC,
+            .socktype  = posix.SOCK.STREAM,
+            .protocol  = 0,
+            .addrlen   = 0,
+            .addr      = null,
+            .canonname = null,
+            .next      = null,
+        };
+        var res: ?*posix.addrinfo = null;
+        try posix.getaddrinfo(host_z, port_str, &hints, &res);
+        defer posix.freeaddrinfo(res);
+
+        var it: ?*posix.addrinfo = res;
+        while (it) |ai| : (it = ai.next) {
             const fd = posix.socket(
-                addr.any.family,
+                @intCast(ai.family),
                 posix.SOCK.STREAM,
                 posix.IPPROTO.TCP,
             ) catch continue;
-            posix.connect(fd, &addr.any, addr.getOsSockLen()) catch {
+            posix.connect(fd, ai.addr.?, @intCast(ai.addrlen)) catch {
                 posix.close(fd);
                 continue;
             };
