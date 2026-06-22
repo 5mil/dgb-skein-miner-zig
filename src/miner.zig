@@ -137,9 +137,15 @@ pub fn runMiner(
     algo:      Algo,
 ) !void {
     if (builtin.os.tag == .linux or builtin.os.tag == .macos) {
+        // Construct an empty sigset without relying on empty_sigset,
+        // which moved/disappeared between Zig versions on musl targets.
+        // Linux sigset_t is [1]u32 on musl or [32]u32 on glibc; zeroing
+        // the whole struct is always correct.
+        var empty_mask: std.posix.sigset_t = @bitCast([_]u8{0} ** @sizeOf(std.posix.sigset_t));
+        _ = &empty_mask;
         const sa = std.posix.Sigaction{
             .handler = .{ .handler = handleSigint },
-            .mask    = std.os.linux.empty_sigset,  // Zig 0.16: moved from std.posix
+            .mask    = empty_mask,
             .flags   = 0,
         };
         try std.posix.sigaction(std.posix.SIG.INT, &sa, null);
