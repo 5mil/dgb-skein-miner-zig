@@ -71,8 +71,9 @@ fn pbkdf2Sha256(
 // Salsa20/8
 // -----------------------------------------------------------------------
 
-inline fn rotl32(v: u32, n: u5) u32 {
-    return (v << n) | (v >> (32 - n));
+// n in 1..18 for Salsa20 constants; (32-n) needs one extra bit -> use u6.
+inline fn rotl32(v: u32, n: u6) u32 {
+    return (v << @as(u5, @truncate(n))) | (v >> @as(u5, @truncate(32 - n)));
 }
 
 fn salsa20_8(B: *[16]u32) void {
@@ -103,7 +104,7 @@ fn salsa20_8(B: *[16]u32) void {
 // -----------------------------------------------------------------------
 
 const R: u32 = 16;
-const BLOCK_WORDS: u32 = 2 * R * 16;   // 512 u32s per block
+const BLOCK_WORDS: u32 = 2 * R * 16;
 const BLOCK_BYTES: u32 = BLOCK_WORDS * 4;
 
 fn blockMix(B: []u32, Y: []u32) void {
