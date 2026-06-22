@@ -1,12 +1,13 @@
 # dgb-skein-miner-zig
 
-Zig port of the DigiByte Skein CPU miner with AVX2 optimizations.
+Clean Zig re-implementation of the DigiByte Skein CPU miner (`rake`).
 
-## Build
+**Status**: Core structure + build system in place. Hashing functions being ported from original C.
+
+## Quick Start
 
 ```bash
-zig build -Doptimize=ReleaseFast
-./zig-out/bin/rake
+zig build run
 ```
 
-Work in progress - core hashing coming next.
+Full port in progress with scalar + AVX2 paths.
