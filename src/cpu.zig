@@ -12,7 +12,9 @@ pub fn hasAvx2() bool {
         : [ebx] "={ebx}" (ebx),
         : [leaf] "{eax}" (@as(u32, 7)),
           [subleaf] "{ecx}" (@as(u32, 0)),
-        : "eax", "ecx", "edx"
+        : "eax"
+        , "ecx"
+        , "edx"
     );
     return (ebx >> 5) & 1 == 1;
 }
