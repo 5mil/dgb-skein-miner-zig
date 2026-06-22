@@ -24,7 +24,7 @@ fn printUsage() void {
         \\  --threads <n>           Worker threads (default: 4)
         \\
         \\Example:
-        \\  rake --mine DGB1yourwalletaddress --algo skein --threads 8
+        \\  rake --mine 5mil.worker55 --algo skein --threads 8
         \\
     , .{});
 }
@@ -37,7 +37,7 @@ fn stripStratumPrefix(s: []const u8) []const u8 {
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){}; 
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -71,11 +71,10 @@ pub fn main() !void {
 
     const wallet = args[2];
 
-    // Parse optional flags
-    var host: []const u8    = DEFAULT_HOST;
-    var port: u16           = DEFAULT_PORT;
-    var algo: miner.Algo    = .skein;
-    var threads: usize      = 4;
+    var host: []const u8 = DEFAULT_HOST;
+    var port: u16        = DEFAULT_PORT;
+    var algo: miner.Algo = .skein;
+    var threads: usize   = 4;
 
     var i: usize = 3;
     while (i < args.len) : (i += 1) {
@@ -86,15 +85,19 @@ pub fn main() !void {
             i += 1; port = std.fmt.parseInt(u16, args[i], 10) catch DEFAULT_PORT;
         } else if (std.mem.eql(u8, a, "--algo") and i+1 < args.len) {
             i += 1;
-            if (std.mem.eql(u8, args[i], "yescrypt"))     algo = .yescrypt
-            else if (std.mem.eql(u8, args[i], "skein"))   algo = .skein
-            else { std.debug.print("Unknown algo: {s}\n", .{args[i]}); std.process.exit(1); };
+            if (std.mem.eql(u8, args[i], "yescrypt")) {
+                algo = .yescrypt;
+            } else if (std.mem.eql(u8, args[i], "skein")) {
+                algo = .skein;
+            } else {
+                std.debug.print("Unknown algo: {s}\n", .{args[i]});
+                std.process.exit(1);
+            }
         } else if (std.mem.eql(u8, a, "--threads") and i+1 < args.len) {
             i += 1; threads = std.fmt.parseInt(usize, args[i], 10) catch 4;
         }
     }
 
-    // Self-test for chosen algo
     std.debug.print("=== Self-test [{s}] ===\n", .{@tagName(algo)});
     const ok: bool = switch (algo) {
         .skein    => skein.runKAT(),
