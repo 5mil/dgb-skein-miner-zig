@@ -3,8 +3,6 @@
 const std     = @import("std");
 const builtin = @import("builtin");
 
-const Vec4 = @Vector(4, u64);
-
 const RC: [8][4]u6 = .{
     .{46,36,19,37}, .{33,27,14,42},
     .{17,49,36,39}, .{44, 9,54,56},
@@ -42,7 +40,6 @@ fn threefish512(key: [9]u64, tweak: [3]u64, pt: [8]u64) [8]u64 {
             for (0..8) |i| t[PERM[i]] = v[i];
             v = t;
         }
-        // inject subkey
         const sk = s + 1;
         for (0..8) |i| v[i] +%= key[(sk + i) % 9];
         v[5] +%= tweak[sk % 3];
@@ -59,19 +56,10 @@ fn ubi(state: *[8]u64, block: [8]u64, tweak: [3]u64) void {
     for (0..8) |i| key[8] ^= key[i];
 
     var tw = tweak;
-    tw[0] +%= 0; // already set by caller
     tw[2] = tw[0] ^ tw[1];
 
     const ct = threefish512(key, tw, block);
     for (0..8) |i| state[i] = ct[i] ^ block[i];
-}
-
-/// Hash one 80-byte header with scalar Skein-512 (fallback path used on aarch64).
-pub fn skein512Scalar(in: *const [80]u8, out: *[64]u8) void {
-    _ = in; _ = out;
-    // Delegate to the main skein module scalar path.
-    // This file is only compiled; actual call routing is in cpu.zig.
-    @compileError("use skein.skein512 directly");
 }
 
 /// 4-way parallel hash -- only meaningful on x86_64 with AVX2.
@@ -93,16 +81,13 @@ pub fn skein512Avx2_4way(
 
     for (ins, outs) |inp, outp| {
         var state = IV;
-        // Block 1: bytes 0..63
         var blk1: [8]u64 = undefined;
         for (0..8) |i| blk1[i] = std.mem.readInt(u64, inp[i*8..][0..8], .little);
         ubi(&state, blk1, .{ 64, T_MSG_FIRST, 0 });
-        // Block 2: bytes 64..79 padded to 64
         var blk2: [8]u64 = .{0} ** 8;
         blk2[0] = std.mem.readInt(u64, inp[64..72][0..8], .little);
         blk2[1] = std.mem.readInt(u64, inp[72..80][0..8], .little);
         ubi(&state, blk2, .{ 80, T_MSG_FINAL, 0 });
-        // Output
         const zero8: [8]u64 = .{0} ** 8;
         ubi(&state, zero8, .{ 8, T_OUT, 0 });
         for (0..8) |i| std.mem.writeInt(u64, outp[i*8..][0..8], state[i], .little);

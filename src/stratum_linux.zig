@@ -1,7 +1,8 @@
 //! Stratum v1 client -- Linux (x86_64-linux-musl, aarch64-linux-musl)
-//! DNS via std.posix.getaddrinfo -- works with musl in Zig 0.16.
+//! DNS via std.c.getaddrinfo -- musl is libc, so std.c symbols are available.
 const std   = @import("std");
 const posix = std.posix;
+const c     = std.c;
 
 pub const Job = struct {
     job_id:      []const u8,
@@ -29,8 +30,9 @@ pub const StratumClient = struct {
         const host_z   = try allocator.dupeZ(u8, host);
         defer allocator.free(host_z);
 
-        const hints = posix.addrinfo{
-            .flags     = .{},
+        // std.c.addrinfo / getaddrinfo / freeaddrinfo -- available when linking musl.
+        const hints = c.addrinfo{
+            .flags     = 0,
             .family    = posix.AF.UNSPEC,
             .socktype  = posix.SOCK.STREAM,
             .protocol  = 0,
@@ -39,11 +41,12 @@ pub const StratumClient = struct {
             .canonname = null,
             .next      = null,
         };
-        var res: ?*posix.addrinfo = null;
-        try posix.getaddrinfo(host_z, port_str, &hints, &res);
-        defer posix.freeaddrinfo(res);
+        var res: ?*c.addrinfo = null;
+        if (c.getaddrinfo(host_z.ptr, port_str.ptr, &hints, &res) != 0)
+            return error.HostNotFound;
+        defer c.freeaddrinfo(res);
 
-        var it: ?*posix.addrinfo = res;
+        var it: ?*c.addrinfo = res;
         while (it) |ai| : (it = ai.next) {
             const fd = posix.socket(
                 @intCast(ai.family),

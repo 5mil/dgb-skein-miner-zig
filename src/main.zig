@@ -35,13 +35,14 @@ fn stripStratumPrefix(s: []const u8) []const u8 {
     return s;
 }
 
-// Zig 0.16 "Juicy Main" -- init gives us allocators and args.
-pub fn main(init: std.process.Init) !void {
-    const gpa   = init.gpa;
-    const arena = init.arena.allocator();
+// Zig 0.16: plain `pub fn main() !void`; use GPA + argsAlloc.
+pub fn main() !void {
+    var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa_state.deinit();
+    const gpa = gpa_state.allocator();
 
-    // toSlice returns []const []const u8 including argv[0]
-    const argv = try init.minimal.args.toSlice(arena);
+    const argv = try std.process.argsAlloc(gpa);
+    defer std.process.argsFree(gpa, argv);
 
     if (argv.len < 2) {
         printUsage();
@@ -105,7 +106,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (algo == .skein) {
         if (cpu.hasAvx2()) std.debug.print("[CPU] AVX2 active\n", .{})
-        else               std.debug.print("[CPU] Scalar path (aarch64)\n", .{});
+        else               std.debug.print("[CPU] Scalar path\n", .{});
     }
 
     std.debug.print("=== Connecting {s}:{d} | wallet={s} | threads={d} ===\n",
