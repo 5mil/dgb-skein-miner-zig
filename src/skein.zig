@@ -1,102 +1,95 @@
-//! Skein-512 — faithful port of the Skein 1.3 reference C implementation.
-//! Reference: http://www.skein-hash.info/sites/default/files/skein1.3.pdf
-
+//! Skein-512 -- direct port of the Skein 1.3 reference C implementation.
 const std = @import("std");
 
 pub const SKEIN_512_BLOCK_BYTES: usize = 64;
 
-const R_512: [8][4]u32 = .{
+// Rotation constants, Skein 1.3 Table 4
+const ROT: [8][4]u8 = .{
     .{46, 36, 19, 37}, .{33, 27, 14, 42},
     .{17, 49, 36, 39}, .{44,  9, 54, 56},
     .{39, 30, 34, 24}, .{13, 50, 10, 17},
     .{25, 29, 39, 43}, .{ 8, 35, 56, 22},
 };
 
-const PERM_512: [8]u8 = .{ 2, 1, 4, 7, 6, 5, 0, 3 };
+// Word permutation, Skein 1.3 Table 2
+const PERM: [8]u8 = .{ 2, 1, 4, 7, 6, 5, 0, 3 };
 
 const KS_PARITY: u64 = 0x1BD11BDAA9FC1A22;
 
-const SKEIN_T1_BLK_TYPE_CFG:   u64 = @as(u64,  4) << 56;
-const SKEIN_T1_BLK_TYPE_MSG:   u64 = @as(u64, 48) << 56;
-const SKEIN_T1_BLK_TYPE_OUT:   u64 = @as(u64, 63) << 56;
-const SKEIN_T1_FLAG_FIRST:      u64 = @as(u64, 1) << 62;
-const SKEIN_T1_FLAG_FINAL:      u64 = @as(u64, 1) << 63;
-const SKEIN_T1_FLAG_FIRST_INV:  u64 = ~SKEIN_T1_FLAG_FIRST;
+const T_CFG:   u64 = @as(u64,  4) << 56;
+const T_MSG:   u64 = @as(u64, 48) << 56;
+const T_OUT:   u64 = @as(u64, 63) << 56;
+const T_FIRST: u64 = @as(u64, 1) << 62;
+const T_FINAL: u64 = @as(u64, 1) << 63;
 
-const SKEIN_CFG_STR_LEN: usize = 32;
-
-// n is in range 1..63; use u7 so (64-n) doesn't overflow u6.
-fn rotl64(x: u64, n: u7) u64 {
-    return (x << @as(u6, @truncate(n))) | (x >> @as(u6, @truncate(64 - n)));
+fn rotl64(x: u64, n: u8) u64 {
+    const s: u6 = @intCast(n % 64);
+    const r: u6 = @intCast((64 - @as(u7, n)) % 64);
+    return (x << s) | (x >> r);
 }
 
-fn threefish512Block(key: *const [9]u64, tweak: *const [3]u64, words: *[8]u64) void {
-    var X: [8]u64 = words.*;
+// Threefish-512: encrypts v[0..8] in place using key[0..9] and tweak[0..3].
+fn tf512(key: [9]u64, tweak: [3]u64, v: *[8]u64) void {
+    // Subkey inject 0
+    v[0] +%= key[0]; v[1] +%= key[1]; v[2] +%= key[2]; v[3] +%= key[3];
+    v[4] +%= key[4]; v[5] +%= key[5] +% tweak[0];
+    v[6] +%= key[6] +% tweak[1]; v[7] +%= key[7]; // s=0, so +0
 
-    // InjectKey(0)
-    inline for (0..8) |i| X[i] +%= key[i];
-    X[5] +%= tweak[0];
-    X[6] +%= tweak[1];
-    // X[7] += 0
+    for (0..72) |d| {
+        // Mix
+        const rc = ROT[d % 8];
+        v[0] +%= v[1]; v[1] = rotl64(v[1], rc[0]) ^ v[0];
+        v[2] +%= v[3]; v[3] = rotl64(v[3], rc[1]) ^ v[2];
+        v[4] +%= v[5]; v[5] = rotl64(v[5], rc[2]) ^ v[4];
+        v[6] +%= v[7]; v[7] = rotl64(v[7], rc[3]) ^ v[6];
 
-    comptime var d: usize = 0;
-    inline while (d < 72) : (d += 1) {
-        const rc = R_512[d % 8];
-        X[0] +%= X[1]; X[1] = rotl64(X[1], @intCast(rc[0])) ^ X[0];
-        X[2] +%= X[3]; X[3] = rotl64(X[3], @intCast(rc[1])) ^ X[2];
-        X[4] +%= X[5]; X[5] = rotl64(X[5], @intCast(rc[2])) ^ X[4];
-        X[6] +%= X[7]; X[7] = rotl64(X[7], @intCast(rc[3])) ^ X[6];
+        // Permute
+        const tmp = v.*;
+        for (0..8) |i| v[i] = tmp[PERM[i]];
 
-        const tmp = X;
-        inline for (0..8) |i| X[i] = tmp[PERM_512[i]];
-
-        if ((d + 1) % 4 == 0) {
-            const s = (d + 1) / 4;
-            inline for (0..8) |i| X[i] +%= key[(s + i) % 9];
-            X[5] +%= tweak[s % 3];
-            X[6] +%= tweak[(s + 1) % 3];
-            X[7] +%= s;
+        // Subkey inject every 4 rounds
+        if ((d & 3) == 3) {
+            const s: u64 = (d + 1) / 4;
+            v[0] +%= key[(s+0) % 9]; v[1] +%= key[(s+1) % 9];
+            v[2] +%= key[(s+2) % 9]; v[3] +%= key[(s+3) % 9];
+            v[4] +%= key[(s+4) % 9]; v[5] +%= key[(s+5) % 9] +% tweak[s % 3];
+            v[6] +%= key[(s+6) % 9] +% tweak[(s+1) % 3];
+            v[7] +%= key[(s+7) % 9] +% s;
         }
     }
-
-    words.* = X;
 }
 
 pub const Skein512Ctx = struct {
-    X:          [8]u64,
-    T:          [3]u64,
-    b:          [SKEIN_512_BLOCK_BYTES]u8,
-    bCnt:       usize,
+    X:    [8]u64,
+    T:    [3]u64,
+    b:    [SKEIN_512_BLOCK_BYTES]u8,
+    bCnt: usize,
     hashBitLen: usize,
 };
 
-fn processBlock(ctx: *Skein512Ctx, blk: *const [SKEIN_512_BLOCK_BYTES]u8, byteCntAdd: usize) void {
-    // Save original chaining state as key
+fn processBlock(ctx: *Skein512Ctx, blk: *const [64]u8, byteCntAdd: usize) void {
+    // Build Threefish key from chaining state + parity word
     var key: [9]u64 = undefined;
     key[8] = KS_PARITY;
-    inline for (0..8) |i| {
-        key[i]  = ctx.X[i];
-        key[8] ^= ctx.X[i];
-    }
+    for (0..8) |i| { key[i] = ctx.X[i]; key[8] ^= ctx.X[i]; }
 
-    // Accumulate byte count and compute T[2]
+    // Accumulate byte count; compute T[2] = T[0] ^ T[1]
     ctx.T[0] +%= @as(u64, byteCntAdd);
     ctx.T[2]  = ctx.T[0] ^ ctx.T[1];
 
-    // Load block as little-endian words
-    var w: [8]u64 = undefined;
-    inline for (0..8) |i| {
-        w[i] = std.mem.readInt(u64, blk[i*8..][0..8], .little);
-    }
+    // Load block words little-endian -- save as plaintext for feedforward
+    var pt: [8]u64 = undefined;
+    for (0..8) |i| pt[i] = std.mem.readInt(u64, blk[i*8..][0..8], .little);
 
-    // Threefish-512 encrypt
-    threefish512Block(&key, &ctx.T, &w);
+    // Encrypt (modifies pt in place -> ciphertext)
+    var ct = pt;
+    tf512(key, ctx.T, &ct);
 
-    // Feedforward: new state = ciphertext XOR plaintext (key = original X)
-    inline for (0..8) |i| ctx.X[i] = w[i] ^ key[i];
+    // UBI feedforward: new_state = ciphertext XOR plaintext
+    for (0..8) |i| ctx.X[i] = ct[i] ^ pt[i];
 
-    // Clear FIRST flag
-    ctx.T[1] &= SKEIN_T1_FLAG_FIRST_INV;
+    // Clear FIRST flag after first block in chain
+    ctx.T[1] &= ~T_FIRST;
 }
 
 pub fn skein512Init(ctx: *Skein512Ctx, hashBitLen: usize) !void {
@@ -105,52 +98,54 @@ pub fn skein512Init(ctx: *Skein512Ctx, hashBitLen: usize) !void {
     ctx.bCnt = 0;
     @memset(&ctx.X, 0);
 
-    // Config block: schema "SHA3" + version 1 + output length in bits
-    var cfg: [SKEIN_512_BLOCK_BYTES]u8 = [_]u8{0} ** SKEIN_512_BLOCK_BYTES;
-    std.mem.writeInt(u64, cfg[0..8][0..8],  @as(u64, 0x0000000133414853), .little);
-    std.mem.writeInt(u64, cfg[8..16][0..8], @as(u64, hashBitLen),          .little);
+    // 32-byte config block, zero-padded to 64
+    var cfg: [64]u8 = [_]u8{0} ** 64;
+    cfg[0] = 0x53; cfg[1] = 0x48; cfg[2] = 0x41; cfg[3] = 0x33; // "SHA3"
+    cfg[4] = 0x01; cfg[5] = 0x00;                                 // version 1
+    std.mem.writeInt(u64, cfg[8..16][0..8], @as(u64, hashBitLen), .little);
 
     ctx.T[0] = 0;
-    ctx.T[1] = SKEIN_T1_FLAG_FIRST | SKEIN_T1_FLAG_FINAL | SKEIN_T1_BLK_TYPE_CFG;
-    processBlock(ctx, &cfg, SKEIN_CFG_STR_LEN);
+    ctx.T[1] = T_FIRST | T_FINAL | T_CFG;
+    processBlock(ctx, &cfg, 32);
 
-    // Prepare for message
+    // Reset for message
     ctx.T[0] = 0;
-    ctx.T[1] = SKEIN_T1_FLAG_FIRST | SKEIN_T1_BLK_TYPE_MSG;
+    ctx.T[1] = T_FIRST | T_MSG;
     ctx.bCnt = 0;
 }
 
 pub fn skein512Update(ctx: *Skein512Ctx, msg: []const u8) void {
-    var remaining = msg;
-
-    if (ctx.bCnt + remaining.len > SKEIN_512_BLOCK_BYTES) {
+    var rem = msg;
+    if (ctx.bCnt + rem.len > SKEIN_512_BLOCK_BYTES) {
         if (ctx.bCnt > 0) {
             const n = SKEIN_512_BLOCK_BYTES - ctx.bCnt;
-            @memcpy(ctx.b[ctx.bCnt..][0..n], remaining[0..n]);
-            remaining = remaining[n..];
+            @memcpy(ctx.b[ctx.bCnt..][0..n], rem[0..n]);
+            rem = rem[n..];
             processBlock(ctx, &ctx.b, SKEIN_512_BLOCK_BYTES);
             ctx.bCnt = 0;
         }
-        while (remaining.len > SKEIN_512_BLOCK_BYTES) {
-            processBlock(ctx, remaining[0..SKEIN_512_BLOCK_BYTES], SKEIN_512_BLOCK_BYTES);
-            remaining = remaining[SKEIN_512_BLOCK_BYTES..];
+        while (rem.len > SKEIN_512_BLOCK_BYTES) {
+            processBlock(ctx, rem[0..64], SKEIN_512_BLOCK_BYTES);
+            rem = rem[SKEIN_512_BLOCK_BYTES..];
         }
     }
-    @memcpy(ctx.b[ctx.bCnt..][0..remaining.len], remaining);
-    ctx.bCnt += remaining.len;
+    @memcpy(ctx.b[ctx.bCnt..][0..rem.len], rem);
+    ctx.bCnt += rem.len;
 }
 
 pub fn skein512Final(ctx: *Skein512Ctx, out: []u8) void {
-    if (ctx.bCnt < SKEIN_512_BLOCK_BYTES) @memset(ctx.b[ctx.bCnt..], 0);
-    ctx.T[1] |= SKEIN_T1_FLAG_FINAL;
+    // Zero-pad remainder, set FINAL, process last message block
+    if (ctx.bCnt < 64) @memset(ctx.b[ctx.bCnt..], 0);
+    ctx.T[1] |= T_FINAL;
     processBlock(ctx, &ctx.b, ctx.bCnt);
 
-    // Output transform
-    const outBlk = [_]u8{0} ** SKEIN_512_BLOCK_BYTES;
+    // Output transform: one block with counter=0 (8-byte LE zero)
+    const outBlk = [_]u8{0} ** 64;
     ctx.T[0] = 0;
-    ctx.T[1] = SKEIN_T1_FLAG_FIRST | SKEIN_T1_FLAG_FINAL | SKEIN_T1_BLK_TYPE_OUT;
+    ctx.T[1] = T_FIRST | T_FINAL | T_OUT;
     processBlock(ctx, &outBlk, 8);
 
+    // Write output little-endian
     const byteCnt = (ctx.hashBitLen + 7) / 8;
     var i: usize = 0;
     while (i < byteCnt) : (i += 8) {
