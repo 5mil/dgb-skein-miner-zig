@@ -1,5 +1,5 @@
 //! Stratum v1 client for DGB pools.
-//! Uses std.posix sockets + getaddrinfo syscall for Zig 0.16 (std.net removed).
+//! Uses std.posix sockets + getaddrinfo for Zig 0.16 (std.net removed).
 const std   = @import("std");
 const posix = std.posix;
 const linux = std.os.linux;
@@ -30,9 +30,9 @@ pub const StratumClient = struct {
         const host_z = try allocator.dupeZ(u8, host);
         defer allocator.free(host_z);
 
-        // std.os.linux.addrinfo uses bare names: flags/family/socktype/protocol/addrlen/addr/canonname/next
+        // linux.AI is a packed struct(u32) -- use AI{} for all-zero flags
         const hints = linux.addrinfo{
-            .flags     = 0,
+            .flags     = linux.AI{},
             .family    = linux.AF.UNSPEC,
             .socktype  = linux.SOCK.STREAM,
             .protocol  = 0,
@@ -42,8 +42,8 @@ pub const StratumClient = struct {
             .next      = null,
         };
         var res: ?*linux.addrinfo = null;
-        const rc = linux.getaddrinfo(host_z.ptr, port_str.ptr, &hints, &res);
-        if (rc != 0) return error.HostNotFound;
+        if (linux.getaddrinfo(host_z.ptr, port_str.ptr, &hints, &res) != 0)
+            return error.HostNotFound;
         defer linux.freeaddrinfo(res);
 
         var it: ?*linux.addrinfo = res;
