@@ -2,7 +2,7 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{ .preferred = .ReleaseFast });
+    const optimize = b.standardOptimizeOption(.{});   // Compatible with older Zig versions
 
     const exe = b.addExecutable(.{
         .name = "rake",
@@ -14,8 +14,10 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
-    if (b.args) |args| run_cmd.addArgs(args);
+    if (b.args) |args| {
+        run_cmd.addArgs(args);
+    }
 
-    const run_step = b.step("run", "Run the miner");
+    const run_step = b.step("run", "Run the rake miner");
     run_step.dependOn(&run_cmd.step);
 }
