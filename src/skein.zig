@@ -3,7 +3,6 @@ const std = @import("std");
 
 pub const SKEIN_512_BLOCK_BYTES: usize = 64;
 
-// Rotation constants, Skein 1.3 Table 4
 const ROT: [8][4]u8 = .{
     .{46, 36, 19, 37}, .{33, 27, 14, 42},
     .{17, 49, 36, 39}, .{44,  9, 54, 56},
@@ -11,7 +10,6 @@ const ROT: [8][4]u8 = .{
     .{25, 29, 39, 43}, .{ 8, 35, 56, 22},
 };
 
-// Word permutation, Skein 1.3 Table 2
 const PERM: [8]u8 = .{ 2, 1, 4, 7, 6, 5, 0, 3 };
 
 const KS_PARITY: u64 = 0x1BD11BDAA9FC1A22;
@@ -28,26 +26,21 @@ fn rotl64(x: u64, n: u8) u64 {
     return (x << s) | (x >> r);
 }
 
-// Threefish-512: encrypts v[0..8] in place using key[0..9] and tweak[0..3].
 fn tf512(key: [9]u64, tweak: [3]u64, v: *[8]u64) void {
-    // Subkey inject 0
     v[0] +%= key[0]; v[1] +%= key[1]; v[2] +%= key[2]; v[3] +%= key[3];
     v[4] +%= key[4]; v[5] +%= key[5] +% tweak[0];
-    v[6] +%= key[6] +% tweak[1]; v[7] +%= key[7]; // s=0, so +0
+    v[6] +%= key[6] +% tweak[1]; v[7] +%= key[7];
 
     for (0..72) |d| {
-        // Mix
         const rc = ROT[d % 8];
         v[0] +%= v[1]; v[1] = rotl64(v[1], rc[0]) ^ v[0];
         v[2] +%= v[3]; v[3] = rotl64(v[3], rc[1]) ^ v[2];
         v[4] +%= v[5]; v[5] = rotl64(v[5], rc[2]) ^ v[4];
         v[6] +%= v[7]; v[7] = rotl64(v[7], rc[3]) ^ v[6];
 
-        // Permute
         const tmp = v.*;
         for (0..8) |i| v[i] = tmp[PERM[i]];
 
-        // Subkey inject every 4 rounds
         if ((d & 3) == 3) {
             const s: u64 = (d + 1) / 4;
             v[0] +%= key[(s+0) % 9]; v[1] +%= key[(s+1) % 9];
@@ -82,7 +75,6 @@ fn processBlock(ctx: *Skein512Ctx, blk: *const [64]u8, byteCntAdd: usize) void {
     tf512(key, ctx.T, &ct);
 
     for (0..8) |i| ctx.X[i] = ct[i] ^ pt[i];
-
     ctx.T[1] &= ~T_FIRST;
 }
 
@@ -205,12 +197,10 @@ pub fn runKAT() bool {
     for (cases) |c| {
         skein512(c.in, &out);
         if (!std.mem.eql(u8, &out, c.exp)) {
-            var exp_hex: [128]u8 = undefined;
-            var got_hex: [128]u8 = undefined;
             std.debug.print("  [FAIL] {s}\n    exp: {s}\n    got: {s}\n", .{
                 c.label,
-                std.fmt.bytesToHex(c.exp, .lower, &exp_hex),
-                std.fmt.bytesToHex(&out,  .lower, &got_hex),
+                std.fmt.bytesToHex(c.exp, .lower),
+                std.fmt.bytesToHex(&out,  .lower),
             });
             ok = false;
         } else {

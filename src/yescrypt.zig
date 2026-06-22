@@ -158,11 +158,9 @@ pub fn selftest(allocator: std.mem.Allocator) !bool {
     try yescryptR16(&zero, &got, allocator);
     const ok = std.mem.eql(u8, &got, &expected);
     if (!ok) {
-        var exp_hex: [64]u8 = undefined;
-        var got_hex: [64]u8 = undefined;
         std.debug.print("[yescrypt] FAIL\n  exp: {s}\n  got: {s}\n", .{
-            std.fmt.bytesToHex(&expected, .lower, &exp_hex),
-            std.fmt.bytesToHex(&got,      .lower, &got_hex),
+            std.fmt.bytesToHex(&expected, .lower),
+            std.fmt.bytesToHex(&got,      .lower),
         });
     } else {
         std.debug.print("[yescrypt] PASS\n", .{});
