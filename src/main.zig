@@ -65,7 +65,7 @@ pub fn main(init: std.process.Init) !void {
         for (0..80) |i| input[i] = std.fmt.parseInt(u8, argv[1][i*2..][0..2], 16) catch 0;
         var output: [64]u8 = undefined;
         skein.skein512(&input, &output);
-        std.debug.print("Skein-512: {s}\n", .{std.fmt.fmtSliceHexLower(&output)});
+        std.debug.print("Skein-512: {s}\n", .{std.fmt.bytesToHex(&output, .lower)});
         return;
     }
 
