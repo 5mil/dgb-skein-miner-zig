@@ -1,8 +1,5 @@
 //! Stratum v1 client for DGB pools.
-//! Parses mining.notify, builds merkle root, handles line dispatch.
-
 const std = @import("std");
-const net = std.net;
 
 pub const Job = struct {
     job_id:      []const u8,
@@ -17,7 +14,7 @@ pub const Job = struct {
 };
 
 pub const StratumClient = struct {
-    stream:            net.Stream,
+    fd:                std.posix.socket_t,
     allocator:         std.mem.Allocator,
     current_job:       ?Job,
     extra_nonce1:      []u8,
@@ -25,23 +22,54 @@ pub const StratumClient = struct {
     username:          []u8,
 
     pub fn connect(allocator: std.mem.Allocator, host: []const u8, port: u16) !StratumClient {
-        const address = try net.Address.resolveIp(host, port);
-        const stream  = try net.tcpConnectToAddress(address);
-        return StratumClient{
-            .stream            = stream,
-            .allocator         = allocator,
-            .current_job       = null,
-            .extra_nonce1      = try allocator.dupe(u8, ""),
-            .extra_nonce2_size = 4,
-            .username          = try allocator.dupe(u8, ""),
-        };
+        const list = try std.net.getAddressList(allocator, host, port);
+        defer list.deinit();
+        if (list.addrs.len == 0) return error.HostNotFound;
+
+        var last_err: anyerror = error.HostNotFound;
+        for (list.addrs) |addr| {
+            const fd = std.posix.socket(
+                addr.any.family,
+                std.posix.SOCK.STREAM,
+                std.posix.IPPROTO.TCP,
+            ) catch |e| { last_err = e; continue; };
+            std.posix.connect(fd, &addr.any, addr.getOsSockLen()) catch |e| {
+                std.posix.close(fd);
+                last_err = e;
+                continue;
+            };
+            return StratumClient{
+                .fd                = fd,
+                .allocator         = allocator,
+                .current_job       = null,
+                .extra_nonce1      = try allocator.dupe(u8, ""),
+                .extra_nonce2_size = 4,
+                .username          = try allocator.dupe(u8, ""),
+            };
+        }
+        return last_err;
+    }
+
+    fn writeAll(self: *StratumClient, data: []const u8) !void {
+        var sent: usize = 0;
+        while (sent < data.len) {
+            const n = try std.posix.send(self.fd, data[sent..], 0);
+            sent += n;
+        }
+    }
+
+    fn readByte(self: *StratumClient) !u8 {
+        var b: [1]u8 = undefined;
+        const n = try std.posix.recv(self.fd, &b, 0);
+        if (n == 0) return error.ConnectionClosed;
+        return b[0];
     }
 
     pub fn subscribe(self: *StratumClient) !void {
         const msg = "{\"id\":1,\"method\":\"mining.subscribe\",\"params\":[\"ZigRake/1.0\"]}\n";
-        _ = try self.stream.write(msg);
+        try self.writeAll(msg);
         var buf: [4096]u8 = undefined;
-        const n   = try self.stream.read(&buf);
+        const n = try std.posix.recv(self.fd, &buf, 0);
         const rsp = buf[0..n];
         if (extractJsonString(rsp, "extra_nonce1")) |en1| {
             if (self.extra_nonce1.len > 0) self.allocator.free(self.extra_nonce1);
@@ -57,9 +85,9 @@ pub const StratumClient = struct {
         const msg = try std.fmt.bufPrint(&buf,
             "{{\"id\":2,\"method\":\"mining.authorize\",\"params\":[\"{s}\",\"{s}\"]}}\n",
             .{ user, pass });
-        _ = try self.stream.write(msg);
+        try self.writeAll(msg);
         var rbuf: [4096]u8 = undefined;
-        _ = try self.stream.read(&rbuf);
+        _ = try std.posix.recv(self.fd, &rbuf, 0);
         std.debug.print("[Stratum] Authorized as {s}\n", .{user});
     }
 
@@ -133,23 +161,23 @@ pub const StratumClient = struct {
             "{{\"id\":4,\"method\":\"mining.submit\",\"params\":" ++
             "[\"{s}\",\"{s}\",\"{s}\",\"{x:0>8}\",\"{x:0>8}\"]}}\n",
             .{ worker, job_id, self.extra_nonce1, ntime, nonce });
-        _ = try self.stream.write(msg);
+        try self.writeAll(msg);
         std.debug.print("[Stratum] Submitted nonce=0x{x:0>8}\n", .{nonce});
     }
 
     pub fn readLine(self: *StratumClient, buf: []u8) !?[]const u8 {
         var i: usize = 0;
         while (i < buf.len) {
-            const n = try self.stream.read(buf[i..][0..1]);
-            if (n == 0) return null;
-            if (buf[i] == '\n') return buf[0..i];
+            const b = self.readByte() catch return null;
+            if (b == '\n') return buf[0..i];
+            buf[i] = b;
             i += 1;
         }
         return null;
     }
 
     pub fn deinit(self: *StratumClient) void {
-        self.stream.close();
+        std.posix.close(self.fd);
         if (self.current_job) |j| self.allocator.free(j.job_id);
         if (self.extra_nonce1.len > 0) self.allocator.free(self.extra_nonce1);
         if (self.username.len > 0)     self.allocator.free(self.username);
