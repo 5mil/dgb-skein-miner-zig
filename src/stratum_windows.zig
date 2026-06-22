@@ -1,14 +1,8 @@
-//! Windows Stratum client -- Winsock2 via std.os.windows
-//! Replaces stratum.zig on windows builds.
-//!
-//! NOTE (Zig 0.16): std has completed migration away from ws2_32.dll
-//! (see 0.16 release notes: "Windows Networking Without ws2_32.dll").
-//! The ws2_32 bindings below may need to be replaced with NtDll-based
-//! equivalents or std.net once the Windows target is actively maintained.
-//! For now the Linux (musl) build is the primary target.
-const std     = @import("std");
-const windows = std.os.windows;
-const ws2     = std.os.windows.ws2_32;
+//! Windows Stratum client -- Zig 0.16 std.net (NtDll-based, no ws2_32.dll dependency).
+//! Zig 0.16 completed migration away from ws2_32.dll; all Windows TCP now goes
+//! through NtDll via std.net.  This file mirrors stratum_linux.zig logic but
+//! uses std.net.Stream instead of raw posix file descriptors.
+const std = @import("std");
 
 pub const Job = struct {
     job_id:      []const u8,
@@ -23,84 +17,45 @@ pub const Job = struct {
 };
 
 pub const StratumClient = struct {
-    sock:              ws2.SOCKET,
+    stream:            std.net.Stream,
     allocator:         std.mem.Allocator,
     current_job:       ?Job,
     extra_nonce1:      []u8,
     extra_nonce2_size: usize,
     username:          []u8,
 
+    /// Connect to host:port using std.net.tcpConnectToHost.
+    /// No ws2_32.dll -- Zig 0.16 routes Windows TCP through NtDll.
     pub fn connect(allocator: std.mem.Allocator, host: []const u8, port: u16) !StratumClient {
-        // Init Winsock
-        var wsa: ws2.WSADATA = undefined;
-        if (ws2.WSAStartup(0x0202, &wsa) != 0) return error.WinsockInitFailed;
-
-        var port_buf: [6]u8 = undefined;
-        // bufPrintZ renamed to bufPrintSentinel in Zig 0.16
-        const port_str = try std.fmt.bufPrintSentinel(&port_buf, 0, "{d}", .{port});
-        const host_z   = try allocator.dupeZ(u8, host);
-        defer allocator.free(host_z);
-
-        var hints = ws2.addrinfoa{
-            .ai_flags    = 0,
-            .ai_family   = ws2.AF.UNSPEC,
-            .ai_socktype = ws2.SOCK.STREAM,
-            .ai_protocol = ws2.IPPROTO.TCP,
-            .ai_addrlen  = 0,
-            .ai_canonname = null,
-            .ai_addr     = null,
-            .ai_next     = null,
+        const stream = try std.net.tcpConnectToHost(allocator, host, port);
+        return StratumClient{
+            .stream            = stream,
+            .allocator         = allocator,
+            .current_job       = null,
+            .extra_nonce1      = try allocator.dupe(u8, ""),
+            .extra_nonce2_size = 4,
+            .username          = try allocator.dupe(u8, ""),
         };
-        var res: ?*ws2.addrinfoa = null;
-        if (ws2.getaddrinfo(host_z.ptr, port_str.ptr, &hints, &res) != 0)
-            return error.HostNotFound;
-        defer ws2.freeaddrinfo(res);
-
-        var it = res;
-        while (it) |ai| : (it = ai.ai_next) {
-            const sock = ws2.socket(ai.ai_family, ai.ai_socktype, ai.ai_protocol);
-            if (sock == ws2.INVALID_SOCKET) continue;
-            if (ws2.connect(sock, ai.ai_addr.?, @intCast(ai.ai_addrlen)) != 0) {
-                _ = ws2.closesocket(sock);
-                continue;
-            }
-            return StratumClient{
-                .sock              = sock,
-                .allocator         = allocator,
-                .current_job       = null,
-                .extra_nonce1      = try allocator.dupe(u8, ""),
-                .extra_nonce2_size = 4,
-                .username          = try allocator.dupe(u8, ""),
-            };
-        }
-        return error.ConnectionFailed;
     }
 
     fn writeAll(self: *StratumClient, data: []const u8) !void {
-        var sent: usize = 0;
-        while (sent < data.len) {
-            const n = ws2.send(self.sock, data[sent..].ptr, @intCast(data.len - sent), 0);
-            if (n == ws2.SOCKET_ERROR) return error.SendFailed;
-            sent += @intCast(n);
-        }
+        try self.stream.writeAll(data);
     }
 
     fn readByte(self: *StratumClient) !u8 {
         var b: [1]u8 = undefined;
-        const n = ws2.recv(self.sock, &b, 1, 0);
-        if (n <= 0) return error.ConnectionClosed;
+        const n = try self.stream.read(&b);
+        if (n == 0) return error.ConnectionClosed;
         return b[0];
     }
 
     pub fn subscribe(self: *StratumClient) !void {
         try self.writeAll("{\"id\":1,\"method\":\"mining.subscribe\",\"params\":[\"ZigRake/1.0\"]}\n");
         var buf: [4096]u8 = undefined;
-        const n = ws2.recv(self.sock, &buf, buf.len, 0);
-        if (n > 0) {
-            if (extractJsonString(buf[0..@intCast(n)], "extra_nonce1")) |en1| {
-                if (self.extra_nonce1.len > 0) self.allocator.free(self.extra_nonce1);
-                self.extra_nonce1 = try self.allocator.dupe(u8, en1);
-            }
+        const n = try self.stream.read(&buf);
+        if (extractJsonString(buf[0..n], "extra_nonce1")) |en1| {
+            if (self.extra_nonce1.len > 0) self.allocator.free(self.extra_nonce1);
+            self.extra_nonce1 = try self.allocator.dupe(u8, en1);
         }
         std.debug.print("[Stratum] Subscribed extra_nonce1={s}\n", .{self.extra_nonce1});
     }
@@ -114,13 +69,14 @@ pub const StratumClient = struct {
             .{ user, pass });
         try self.writeAll(msg);
         var rbuf: [4096]u8 = undefined;
-        _ = ws2.recv(self.sock, &rbuf, rbuf.len, 0);
+        _ = try self.stream.read(&rbuf);
         std.debug.print("[Stratum] Authorized as {s}\n", .{user});
     }
 
     pub fn handleLine(self: *StratumClient, line: []const u8, allocator: std.mem.Allocator) !void {
         if (std.mem.indexOf(u8, line, "mining.notify") != null)
-            try self.parseNotify(line, allocator);
+            try self.parseNotify(line, allocator)
+        else if (std.mem.indexOf(u8, line, "mining.set_difficulty") != null) {}
     }
 
     pub fn parseNotify(self: *StratumClient, line: []const u8, allocator: std.mem.Allocator) !void {
@@ -182,8 +138,7 @@ pub const StratumClient = struct {
     }
 
     pub fn deinit(self: *StratumClient) void {
-        _ = ws2.closesocket(self.sock);
-        ws2.WSACleanup();
+        self.stream.close();
         if (self.current_job) |j| self.allocator.free(j.job_id);
         if (self.extra_nonce1.len > 0) self.allocator.free(self.extra_nonce1);
         if (self.username.len > 0)     self.allocator.free(self.username);
