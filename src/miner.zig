@@ -9,7 +9,6 @@ const cpu      = @import("cpu.zig");
 
 pub const Algo = enum { skein, yescrypt };
 
-/// Global stop flag -- set by SIGINT handler or main on disconnect.
 pub var g_stop = std.atomic.Value(bool).init(false);
 
 fn buildHeader(
@@ -125,13 +124,9 @@ fn workerFn(ctx: *WorkerCtx) void {
     }
 }
 
-// Zig 0.16 on Linux: sigaction handler receives os.linux.SIG__enum_*, not c_int.
-// Derive the exact fn type from the Sigaction struct so we never get it wrong again.
-const SigHandlerFn = std.meta.Child(
-    @TypeOf(@as(std.posix.Sigaction, undefined).handler.handler)
-);
-
-fn handleSigint(_: SigHandlerFn.@"0") callconv(.c) void {
+// Zig 0.16 linux: sigaction handler param is std.os.linux.SIG (a typed enum), not c_int.
+// Use SIG_DFL's type to extract the right fn signature portably.
+fn handleSigint(_: std.os.linux.SIG) callconv(.c) void {
     g_stop.store(true, .release);
 }
 
@@ -143,8 +138,7 @@ pub fn runMiner(
     threads:   usize,
     algo:      Algo,
 ) !void {
-    const builtin_os = builtin.os.tag;
-    if (builtin_os == .linux or builtin_os == .macos) {
+    if (builtin.os.tag == .linux or builtin.os.tag == .macos) {
         const sa = std.posix.Sigaction{
             .handler = .{ .handler = handleSigint },
             .mask    = std.posix.empty_sigset,
