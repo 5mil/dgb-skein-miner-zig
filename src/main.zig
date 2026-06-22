@@ -29,22 +29,21 @@ fn printUsage() void {
     , .{});
 }
 
-/// Strip stratum+tcp:// or stratum:// prefix if present.
 fn stripStratumPrefix(s: []const u8) []const u8 {
     if (std.mem.startsWith(u8, s, "stratum+tcp://")) return s["stratum+tcp://".len..];
     if (std.mem.startsWith(u8, s, "stratum://"))     return s["stratum://".len..];
     return s;
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var arg_iter = try std.process.argsWithAllocator(allocator);
+    // Collect args using Zig 0.16 init.args API
+    var arg_iter = try init.minimal.args.iterateAllocator(allocator);
     defer arg_iter.deinit();
 
-    // Collect args into a list
     var args = std.ArrayList([]const u8).init(allocator);
     defer args.deinit();
     while (arg_iter.next()) |arg| {
@@ -64,7 +63,6 @@ pub fn main() !void {
         return;
     }
 
-    // Single-header debug hash
     if (argv[1].len == 160) {
         var input: [80]u8 = undefined;
         for (0..80) |i| input[i] = std.fmt.parseInt(u8, argv[1][i*2..][0..2], 16) catch 0;
@@ -78,7 +76,6 @@ pub fn main() !void {
     if (argv.len < 3) { printUsage(); std.process.exit(1); }
 
     const wallet = argv[2];
-
     var host: []const u8 = DEFAULT_HOST;
     var port: u16        = DEFAULT_PORT;
     var algo: miner.Algo = .skein;
